@@ -172,6 +172,10 @@ class RetinaModel:
     tilt_um_per_mm: float = 0.0           # global B-scan tilt (per-eye)
     pit_asymmetry: float = 0.0            # -1..1 skew of the two foveal walls
     undulation: object = None            # BoundaryUndulation | None
+    # data-driven geometry (from a LayerShapeModel): per-layer thickness (µm) on an
+    # eccentricity grid; when set it REPLACES the parametric foveal pit with real morphology.
+    data_thickness: object = None         # [n_layer, n_ecc] µm, aligned to self.layers
+    data_ecc_um: object = None            # [n_ecc] signed eccentricity from center_x_um
     # realism texture (propagated onto every CrossSection; see the builder)
     texture_contrast: float = 0.22       # slow intra-layer mottling depth
     interface_jitter: float = 0.30       # lateral break-up of specular interfaces
@@ -307,7 +311,15 @@ class RetinaModel:
         base_t = np.array([ly.thickness_um for ly in layers])[:, None] * np.ones((1, n_x))
         t_phys = base_t.copy()
 
-        if self.location == "macula":
+        if self.data_thickness is not None:
+            # data-driven: interpolate each layer's real thickness profile onto this scan
+            # (fovea at center_x_um). The pit/bulge come from the shape model, not a formula.
+            ecc = x - self.center_x_um
+            dt = np.asarray(self.data_thickness, float)
+            de = np.asarray(self.data_ecc_um, float)
+            for i in range(min(len(layers), dt.shape[0])):
+                t_phys[i] = np.interp(ecc, de, dt[i])
+        elif self.location == "macula":
             r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
             # per-column pit radius so the two foveal walls can differ (asymmetry);
             # smootherstep gives a gentle, non-peaky parafoveal ridge.
