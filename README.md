@@ -1,124 +1,126 @@
-# octsim — a physically-modelled OCT B-scan synthesizer
+# octsim — a physically-modelled OCT simulation platform
 
-Generate synthetic OCT B-scans (mirror, paper, cornea, macula, or any layered
-sample you define) from a physical forward model, **per spectrum / per A-scan**.
-The simulator emits both the raw interferometric spectrum a swept source would
-digitise *and* the reconstructed B-scan, plus a free per-pixel layer label map.
+Generate synthetic OCT data — single B-scans or **volumes** of retina (macula,
+optic-nerve head, periphery), cornea, or bench targets (mirror, paper) — from a
+physical forward model, **per spectrum / per A-scan**. Every sample carries the raw
+interferometric spectra, the reconstructed B-scan, and a free per-pixel layer/feature
+label map. Built for training deep models in sparse-data regimes: one call yields **N
+independent random samples** defined by physics + acquisition parameters.
 
-It is deliberately small, dependency-light (numpy; matplotlib only for the
-gallery), and fast — the whole four-preset gallery renders in a few seconds, and
-the physics test suite runs in under a second.
+There is a **programmatic API** and a **PySide6 GUI**.
 
 ```python
-from octsim import LightSource, simulate_bscan, presets, NoiseModel
+from octsim import SimConfig, simulate, generate_dataset
 
-res = simulate_bscan(presets.macula(), LightSource(),
-                     noise=NoiseModel.typical(), seed=1)
-res.bscan_db      # [depth, x] display image (dB, 0 dB peak)
-res.spectra       # [n_k, x] raw interferometric spectra (pre-reconstruction)
-res.label_map     # [depth, x] uint8 layer index (free segmentation ground truth)
+cfg = SimConfig(
+    anatomy="macula", scan_pattern="volume", n_frames=32, slow_fov_um=6000.0,
+    axial_resolution_um=5.0, lateral_fov_um=6000.0, lines_per_frame=512,
+    line_rate_hz=100_000, motion_level=1.0, falloff_6db_um=1500.0, noise_level=1.0,
+)
+sample = simulate(cfg, seed=1)                 # one B-scan or volume
+sample.volume_db          # [n_frames, depth, x] display stack (dB)
+sample.label_map          # [n_frames, depth, x] layer index (free ground truth)
+
+for s in generate_dataset(cfg, n=200, seed=0): # N random samples, in-memory
+    train_on(s.bscan_db, s.labels2d)
+```
+
+```bash
+octsim                       # launch the GUI (needs the [gui] extra)
+octsim --generate 5 --anatomy macula --pattern volume --frames 16   # headless
+octsim --selftest            # headless smoke test, exit 0/1
 ```
 
 ## The physical model
 
-The signal chain, per A-scan:
+Per A-scan: a scene → a complex reflectivity field → the interferometric spectrum
+`I(k) = P(k)·|a_ref + Σ r·exp(i·2k·z)|²` → DC-removal + window + IFFT → B-scan. On top
+of the ideal fringe the forward model folds in the instrument/acquisition physics:
 
-```
-layered sample  ->  complex reflectivity field r[z, x]  (specular interfaces
-                                                          + speckle cells)
-     r[z, x]    ->  I(k) = P(k) · | a_ref + Σ r · exp(i·2·k·z) | ²   (forward)
-       I(k)     ->  + shot / RIN / read noise
-       I(k)     ->  DC high-pass  ->  Hann window  ->  IFFT  ->  |·|  ->  dB
-```
+- **Source & resolution** — Gaussian source sampled linearly in `k`; wavelength +
+  bandwidth set the axial resolution.
+- **Sensitivity fall-off** — depth-dependent roll-off (`sinc × Gaussian`), one 6 dB-depth knob.
+- **Dispersion** — a single intuitive knob: `0` = sharp, magnitude = axial stretch, sign = chirp direction.
+- **Acquisition speed** — line/sweep-rate → integration time `T_int`, which drives both the
+  collected signal (shot-limited SNR ∝ √T_int) **and** fringe washout — the real OCT trade-off, emergent.
+- **Motion & artifacts** — one continuous `Δz(t)` trajectory (drift + cardiac/breathing +
+  microsaccades) sampled along the acquisition time axis, so bulk motion, phase drift, and
+  washout are **correlated across A-scans and across the frames of a volume**.
+- **Detector noise** — shot (∝√I) + RIN (∝I) + read (floor), tunable clean → degraded, with a
+  noise-free toggle and a target-SNR (dB) knob.
 
-* **Source** (`source.py`) — a Gaussian spectrum sampled linearly in wavenumber
-  `k` (SS-OCT convention). Two knobs, `center_wavelength_nm` and
-  `bandwidth_fwhm_nm`, set the carrier and the axial resolution; the imaging
-  depth and depth-pixel size follow from the k-sampling. Defaults model a ~1050 nm /
-  100 nm ophthalmic source (~4.9 µm axial resolution, ~1.9 mm optical depth).
-* **Sample** (`sample.py`) — an ordered stack of `Layer`s (thickness, refractive
-  index, backscatter, scattering coefficient), optionally curved. It becomes a
-  complex reflectivity field on the reconstruction grid:
-  * **volume speckle** as a circular complex-Gaussian per resolution cell (the
-    central-limit limit of many sub-resolution scatterers → fully-developed,
-    Rayleigh-magnitude speckle), scaled by backscatter and a Beer–Lambert
-    `exp(-μ_t·d)` roll-off;
-  * **specular interfaces** as deterministic Fresnel reflectors at each boundary;
-  * a **lateral beam convolution** that sets the lateral resolution and the
-    speckle grain size.
-* **Forward** (`forward.py`) — the interferometric spectrum. Because `k` is
-  linear and the depth grid satisfies `2·k·z = 2π·m·p/n_k`, the coherent sum is
-  evaluated **exactly** as one FFT per B-scan (verified to machine precision
-  against the direct phasor sum). A direct-sum primitive for arbitrary off-grid
-  point scatterers is kept for validation.
-* **Noise** (`noise.py`) — the three physical components: shot (`∝√I`), relative
-  intensity noise (`∝I`), and read (constant), added in the wavenumber domain.
-* **Reconstruct** (`reconstruct.py`) — textbook SD/SS-OCT inverse (spectral
-  high-pass DC removal → Hann → IFFT → positive-depth half).
+First-Born / single-scattering: every scatterer contributes once (multiple scattering not modelled).
 
-This is a **first-Born / single-scattering** model: every scatterer contributes
-once, independently. It reproduces speckle, the coherence-gated axial PSF, the
-lateral PSF, index-dependent optical path, and a realistic noise floor. It does
-**not** model multiple scattering — the deliberate, corpus-scalable fidelity
-tier, which bounds fidelity for deep / turbid / edematous tissue and for deep
-speckle statistics.
+## Resolvable parameters
 
-## Presets
+Physically-linked quantities may be specified from *either* side; the config back-solves the
+rest (a `0` on a linked field means "derive me") and reports both:
 
-| Preset | What it exercises |
+| specify… | …or its physical target |
 | --- | --- |
-| `mirror()` | Single specular reflector → axial PSF / resolution validation |
-| `paper()` | Dense turbid slab → fully-developed speckle + Beer–Lambert roll-off |
-| `cornea()` | Bright anterior/posterior surfaces + weak stroma, curved |
-| `macula()` | Layered retina with the hyper/hypo-reflective NFL…RPE…choroid pattern |
+| `bandwidth_fwhm_nm` | `axial_resolution_um` |
+| `k_span_factor` | `axial_range_um` / `axial_sampling_um` (with `pixels_per_spectrum`) |
+| `beam_waist_um` | `lateral_resolution_um` |
 
-Optical parameters in `presets.py` are **physically motivated but illustrative** —
-they are the knobs to calibrate against real scans, not measured constants.
+Scan geometry (fast axis `lateral_fov_um`/`lines_per_frame`, slow axis `slow_fov_um`/`n_frames`),
+speed (`line_rate_hz`, `duty_cycle`, `flyback_time_s`), and the adjustable sample position
+(`sample_depth_um`, `sample_lateral_offset_um`) round out the acquisition.
 
-## Usage
+## Anatomy
+
+Retina is modelled in 3D (enface-parameterized) with **reasonable physiological thicknesses**
+(total neurosensory retina ≈ 270 µm) and the characteristic OCT layer pattern, so a volume sweeps
+a consistent scene:
+
+- **Foveal pit** — inner layers (NFL…OPL) thin toward the centre while the photoreceptor/RPE
+  complex stays anchored flat; the ONL bulges centrally.
+- **Optic nerve head** — the RPE/photoreceptor bands **terminate at Bruch's-membrane opening**,
+  a central cup, RNFL thickening toward the disc, and a neural-canal fill (informed by clinical ONH OCT).
+- **Blood vessels** — vertically-oval hyporeflective lumen + hyperreflective wall in the inner
+  retina, with a posterior shadow.
+- **Choroid, vitreous, curvature.** Optical properties are illustrative and **calibratable** —
+  there is no validated per-layer retinal optical-property table; tune against real scans.
+
+`generate_dataset` draws a fresh random anatomy (layer thicknesses, pit/cup, vessels, position) +
+speckle + motion per sample, reproducible via `SeedSequence`.
+
+## Package map
+
+```
+octsim/
+  config.py        SimConfig (resolvable) + resolve() -> ResolvedConfig
+  source.py        Gaussian source / k-grid / axial calibration
+  optics.py        sensitivity fall-off + beam helpers
+  dispersion.py    dispersion phase + compensation
+  acquisition.py   ScanGeometry + Timing (speed -> T_int, timestamps)
+  motion.py        continuous Δz(t) trajectory; bulk motion / drift / washout
+  sample.py        reflectivity core (single-draw speckle, per-column attenuation, features)
+  features.py      BloodVessel (+ shadow)
+  anatomy/retina.py  RetinaModel (layers, foveal pit, ONH, vessels), random/default builders
+  forward.py       I(k) with fall-off + dispersion + signal-scale + motion/washout
+  reconstruct.py   IFFT reconstruction (+ optional dispersion compensation)
+  noise.py         shot / RIN / read
+  generate.py      simulate() (B-scan/volume) + generate_dataset() (N samples)
+  presets.py       mirror / paper / cornea / macula (Sample)
+  gui/             PySide6 app (launcher, widgets) + CLI (app.py)
+```
+
+## Install & test
 
 ```bash
-# from this directory
-python -m pip install numpy matplotlib          # (scipy not required)
-
-python examples/generate_gallery.py             # render all presets -> examples/output/
-python examples/generate_gallery.py macula --n-ascans 512
-python tests/test_octsim.py                      # physics checks (or: python -m pytest tests/)
+pip install -e .            # core (numpy, scipy)
+pip install -e .[gui]       # + PySide6, pyqtgraph, matplotlib for the GUI
+python tests/test_phase_a.py  # ... phase_b, phase_c, phase_d, test_octsim
+QT_QPA_PLATFORM=offscreen python tests/test_gui_smoke.py
 ```
 
-Build your own sample:
+The physics/anatomy/generation suites (33 checks) run in a couple of seconds and pin the
+resolvable config, timing, fall-off, dispersion, speed↔SNR trade, motion correlation, foveal pit,
+vessel shadow, ONH termination, and dataset reproducibility.
 
-```python
-from octsim import Layer, Sample, LightSource, simulate_bscan
+## Roadmap
 
-sample = Sample("two-layer", top_n=1.0, surface_um=150.0, layers=[
-    Layer("film",   thickness_um=60,  n=1.45, backscatter=2e-2, mu_s_per_mm=8),
-    Layer("substrate", thickness_um=400, n=1.38, backscatter=1e-2, mu_s_per_mm=3),
-])
-res = simulate_bscan(sample, LightSource(bandwidth_fwhm_nm=120), seed=0)
-```
-
-## What the tests validate
-
-* a mirror reconstructs at its inserted depth; the axial FWHM matches the
-  source-bandwidth coherence limit (× the ~1.2 Hann-window factor);
-* more bandwidth → sharper axial PSF (monotonic);
-* the FFT forward path equals the direct phasor sum to machine precision;
-* paper's in-slab speckle is Rayleigh (row-normalised contrast ≈ 0.52);
-* detector noise lifts the deep background;
-* the macula shows ordered, sub-surface layer structure.
-
-## Roadmap / natural extensions
-
-* **Calibrate the retinal optical properties** (per-layer n, μ_s, g) against real
-  macular OCT — the single biggest realism lever.
-* **Foveal pit**: x-dependent inner-layer thinning (the current model uses
-  fixed-thickness layers + a gentle contour).
-* **Raw-format emitters**: write the spectra as the `uint16` `.raw` layouts and
-  `.CLB` files consumed by the OCT-Denoiser / OCT-Reconstruction / OCT-Super-
-  Resolution pipelines, and cross-check by feeding them through the Line-Field-OCT
-  reconstruction.
-* **Pathology**: fluid pockets (low-scatter), drusen (RPE deformation), edema
-  (thickening) — each carrying free labels.
-* **Higher-fidelity tier**: a Monte-Carlo validation subset to bound the
-  single-scattering gap.
+- Calibrate retinal layer optical properties against real macular OCT (biggest realism lever).
+- Cornea anatomy (endothelial mosaic, iris, lens) on the same feature framework.
+- Disk/raw-`uint16`/`.CLB` writers to feed the OCT-Denoiser / Reconstruction / Super-Resolution pipelines.
+- Optional GPU/torch forward path for very large corpora.
