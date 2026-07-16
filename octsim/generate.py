@@ -121,7 +121,10 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
                 layer_interface=cross.layer_interface, top_n=cross.top_n,
                 depth_axis_um=depth, x_axis_um=x_axis, beam_waist_um=resolved.beam_waist_um,
-                lateral_extent_um=fov, rng=rng, features=cross.features, y_um=y_um)
+                lateral_extent_um=fov, rng=rng, features=cross.features, y_um=y_um,
+                texture_contrast=cross.texture_contrast,
+                interface_jitter=cross.interface_jitter,
+                vitreous_backscatter=cross.vitreous_backscatter)
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
 
@@ -199,9 +202,17 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
 
 
 def _seed_key(rng: np.random.Generator) -> int:
+    """A stable, per-sample-distinct identifier from the RNG's SeedSequence.
+
+    Spawned children share the parent ``entropy`` and differ only by ``spawn_key``,
+    so both must enter the key or every sample in a dataset gets the same id.
+    """
     try:
-        ent = rng.bit_generator.seed_seq.entropy  # type: ignore[attr-defined]
-        return int(ent if np.isscalar(ent) else ent[0])
+        sq = rng.bit_generator.seed_seq  # type: ignore[attr-defined]
+        ent = sq.entropy
+        base = int(ent if np.isscalar(ent) else ent[0])
+        spawn = tuple(int(s) for s in getattr(sq, "spawn_key", ()) or ())
+        return int(hash((base, spawn)) & 0xFFFFFFFF)
     except Exception:
         return 0
 

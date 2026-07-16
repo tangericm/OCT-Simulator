@@ -21,22 +21,25 @@ import numpy as np
 
 @dataclass
 class BloodVessel:
-    """A retinal vessel crossing the enface plane.
+    """A retinal vessel embedded in the inner retina, crossing the enface plane.
 
     Its enface path is a line ``x(y) = x0 + slope·(y - y0)`` over ``|y - y0| <=
-    y_half_extent``; it sits at optical depth ``depth_opt_um`` (a plexus) with
-    diameter ``caliber_um`` and casts a shadow of optical density ``shadow_od``.
+    y_half_extent``. Crucially the vessel is anchored to the LOCAL inner-retinal
+    surface, not an absolute depth: its centre sits ``plexus_offset_um`` below the
+    local ILM (``ctx.opt_b[0]``) so it rides the foveal pit and the dome and never
+    floats in the vitreous. Rendered as a vertically-oval hyporeflective lumen with a
+    thin hyperreflective wall, plus a posterior shadow that starts at the vessel's
+    back wall and deepens with caliber.
     """
 
     x0_um: float
     y0_um: float
-    depth_opt_um: float
     caliber_um: float
+    plexus_offset_um: float = 0.0    # EXTRA depth below "top tucked under the ILM"
     slope: float = 0.0
     y_half_extent_um: float = 1e9
     shadow_od: float = 1.2
     lumen_gain: float = 0.15
-
     #: brightness of the hyperreflective vessel wall (relative reflectivity) — subtle
     wall_amp: float = 1.6e-2
 
@@ -50,25 +53,34 @@ class BloodVessel:
             return
         xv = self.x0_um + self.slope * (y - self.y0_um)
         cal = max(self.caliber_um, 1e-6)
+        z_half = 0.62 * cal
+        x_half = 0.5 * cal
 
-        # slightly vertically-oval footprint (real vessels read a touch taller than wide)
-        X = (x[None, :] - xv) / (0.5 * cal)                        # [1, n_x]
-        Z = (depth[:, None] - self.depth_opt_um) / (0.62 * cal)    # [n_depth, 1]
+        # anchor to the LOCAL ILM depth at this column; place the vessel so its top
+        # tucks just under the surface (never in the vitreous), deeper for deep plexi.
+        ilm = float(np.interp(xv, x, ctx.opt_b[0])) if ctx.opt_b is not None else depth[0]
+        center_z = ilm + z_half + 2.0 * ctx.dz + self.plexus_offset_um
+
+        X = (x[None, :] - xv) / x_half                             # [1, n_x]
+        Z = (depth[:, None] - center_z) / z_half                   # [n_depth, 1]
         rr = X ** 2 + Z ** 2
+        not_vitreous = depth[:, None] >= ilm                       # hard guard: nothing above ILM
 
-        lumen = rr <= 1.0
-        wall = (rr > 1.0) & (rr <= 1.4)                            # thin hyperreflective wall ring
+        lumen = (rr <= 1.0) & not_vitreous
+        wall = (rr > 1.0) & (rr <= 1.4) & not_vitreous             # thin hyperreflective wall ring
         r[lumen] *= self.lumen_gain
-        if self.wall_amp > 0 and np.any(wall):
-            g = (ctx.rng.standard_normal(r.shape)
-                 + 1j * ctx.rng.standard_normal(r.shape)) / np.sqrt(2.0)
-            r[wall] += self.wall_amp * g[wall]
+        if self.wall_amp > 0:
+            n = int(np.count_nonzero(wall))
+            if n:
+                g = (ctx.rng.standard_normal(n) + 1j * ctx.rng.standard_normal(n)) / np.sqrt(2.0)
+                r[wall] += self.wall_amp * g
 
-        # graded posterior shadow: full under the lumen centre, tapering laterally,
-        # only below the vessel (smooth, no hard-edged band).
+        # posterior shadow: begins at the vessel's BACK wall, tapers laterally, and
+        # deepens with caliber (longer blood path -> more attenuation).
+        od = self.shadow_od * (0.6 + 0.6 * min(cal / 120.0, 1.5))
         lateral = np.exp(-((x - xv) / (0.6 * cal)) ** 2)[None, :]  # [1, n_x]
-        below = (depth[:, None] > self.depth_opt_um).astype(float)
-        r *= 1.0 - (1.0 - np.exp(-self.shadow_od)) * lateral * below
+        below = (depth[:, None] > center_z + z_half).astype(float)
+        r *= 1.0 - (1.0 - np.exp(-od)) * lateral * below
 
 
 @dataclass

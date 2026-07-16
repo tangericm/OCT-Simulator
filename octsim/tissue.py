@@ -60,4 +60,5 @@ def scale_layer(mu_s_ref_per_mm: float, backscatter_ref: float, wavelength_nm: f
     # with wavelength; water absorption from the tabulated spectrum.
     mu_a = (water_fraction * water_absorption_per_um(wavelength_nm)
             + melanin * 3.0e-3 * melanin_absorption_scale(wavelength_nm))
-    return mu_s + mu_a, backscatter_ref * s
+    # backscatter is an AMPLITUDE, so it scales as sqrt(mu_s) (intensity ~ mu_s).
+    return mu_s + mu_a, backscatter_ref * np.sqrt(s)
