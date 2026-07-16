@@ -94,6 +94,7 @@ class CrossSection:
     vitreous_backscatter: float = 0.0    # faint fill above the ILM (not pure black)
     layer_directional: object = None     # [L, n_x] per-column directional gain (or None)
     boundary_sharpness_um: float = 0.0   # axial transition width (softens the bands)
+    texture_field: object = None         # CoherentField for volume-coherent mottling (or None)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -186,6 +187,9 @@ class RetinaModel:
     # directional reflectance
     directional_strength: float = 0.6    # 0 = isotropic; scales SC + Henle effects
     henle_sign: float = 0.0              # -1..1 pupil-offset sign of the HFL asymmetry
+    # volume-coherent texture (fixed 3-D fields; sampled per frame -> smooth across a volume)
+    mottle_field: object = None          # CoherentField for intra-layer mottling
+    choroid_field: object = None         # CoherentField for the choroidal vascular pattern
 
     def _landmarks(self):
         """Return ``(fovea_x, disc_x_or_None)`` for this scene in absolute enface x (µm)."""
@@ -214,6 +218,7 @@ class RetinaModel:
         cross.interface_jitter = self.interface_jitter
         cross.vitreous_backscatter = self.vitreous_backscatter
         cross.boundary_sharpness_um = self.boundary_sharpness_um
+        cross.texture_field = self.mottle_field
         cross.layer_directional = self._directional_gain(cross.opt_b, x, groups)
         return cross
 
@@ -329,13 +334,13 @@ class RetinaModel:
         t_phys = base_t.copy()
 
         if self.data_thickness is not None:
-            # data-driven: interpolate each layer's real thickness profile onto this scan
-            # (fovea at center_x_um). The pit/bulge come from the shape model, not a formula.
-            ecc = x - self.center_x_um
+            # data-driven: interpolate each layer's real thickness profile onto this scan at
+            # its RADIAL eccentricity (fast + slow), so the pit recedes across a volume's
+            # frames. The pit/bulge come from the shape model, not a formula.
             dt = np.asarray(self.data_thickness, float)
             de = np.asarray(self.data_ecc_um, float)
             for i in range(min(len(layers), dt.shape[0])):
-                t_phys[i] = np.interp(ecc, de, dt[i])
+                t_phys[i] = self._radial_interp(dt[i], de, x, self.center_x_um, y_um)
         elif self.location == "macula":
             r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
             # per-column pit radius so the two foveal walls can differ (asymmetry);
@@ -366,11 +371,30 @@ class RetinaModel:
             i = choroid_idx[0]
             cross.features.append(ChoroidTexture(
                 top_opt=cross.opt_b[i], bot_opt=cross.opt_b[i + 1],
-                contrast=self.choroid_contrast))
+                contrast=self.choroid_contrast, field=self.choroid_field))
         return cross
 
     _FIELD_ORDER = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL",
                     "ELM", "EZ", "IZ", "RPE", "choroid"]
+
+    def _radial_interp(self, dt_i, de, x, fovea_x, y_um, blend_um=400.0):
+        """Sample a 1-D thickness profile ``dt_i`` (on grid ``de``) at the **radial**
+        eccentricity for a frame at slow position ``y_um``.
+
+        Off the foveal B-scan the whole profile is pushed to larger radius
+        ``hypot(x-fovea, y-fovea_y)``, so the pit shallows and recedes as a volume's frames
+        sweep away from the fovea. The two radial sides are blended over ``blend_um`` around
+        the fovea column so an asymmetric profile (e.g. the RNFL nasal/temporal gradient)
+        stays continuous — no step at ``x = fovea``."""
+        ecc_x = np.asarray(x, float) - fovea_x
+        dy = float(y_um) - self.center_y_um
+        if abs(dy) < 1e-6:
+            return np.interp(ecc_x, de, dt_i)
+        r = np.hypot(ecc_x, dy)
+        tp = np.interp(r, de, dt_i)          # +radial side
+        tm = np.interp(-r, de, dt_i)         # -radial side
+        w = 0.5 * (1.0 + np.clip(ecc_x / blend_um, -1.0, 1.0))
+        return w * tp + (1.0 - w) * tm
 
     def _macula_thickness(self, x, y_um):
         """Per-layer macular thickness ``{name: [n_x]}`` for the 11 real layers, data-driven
@@ -379,12 +403,11 @@ class RetinaModel:
         fovea_x, _ = self._landmarks()
         t = {}
         if self.data_thickness is not None:
-            ecc = x - fovea_x
             de = np.asarray(self.data_ecc_um, float)
             dt = np.asarray(self.data_thickness, float)
             for i, ly in enumerate(self.layers):
-                t[ly.name] = (np.interp(ecc, de, dt[i]) if i < dt.shape[0]
-                              else np.full(n_x, ly.thickness_um))
+                t[ly.name] = (self._radial_interp(dt[i], de, x, fovea_x, y_um)
+                              if i < dt.shape[0] else np.full(n_x, ly.thickness_um))
         else:
             r_fov = np.sqrt((x - fovea_x) ** 2 + (y_um - self.center_y_um) ** 2)
             side = np.tanh((x - fovea_x) / 150.0)
@@ -459,7 +482,8 @@ class RetinaModel:
             top_n=self.top_n, features=list(self.vessels), label_names=list(order))
         ci = order.index("choroid")
         cross.features.append(ChoroidTexture(
-            top_opt=cross.opt_b[ci], bot_opt=cross.opt_b[ci + 1], contrast=self.choroid_contrast))
+            top_opt=cross.opt_b[ci], bot_opt=cross.opt_b[ci + 1],
+            contrast=self.choroid_contrast, field=self.choroid_field))
         return cross
 
 
@@ -511,6 +535,9 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
     undulation = BoundaryUndulation.make(
         len(RETINA_LAYERS) + 2, rng,
         amp_um=float(rng.uniform(2.0, 6.0)), corr_um=float(rng.uniform(350.0, 600.0)))
+    texture_contrast = float(rng.uniform(0.16, 0.30))
+    choroid_contrast = float(rng.uniform(0.45, 0.62))
+    mottle_field, choroid_field = _texture_fields(rng, texture_contrast, choroid_contrast)
 
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
@@ -520,16 +547,27 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         curvature_radius_um=float(rng.uniform(30000.0, 48000.0)),
         curvature_sag_um=float(rng.uniform(420.0, 640.0)),
         boundary_sharpness_um=float(rng.uniform(4.0, 7.0)),
-        choroid_contrast=float(rng.uniform(0.45, 0.62)),
+        choroid_contrast=choroid_contrast,
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
         disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
         tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
         pit_asymmetry=float(rng.uniform(-0.5, 0.5)),
         undulation=undulation,
-        texture_contrast=float(rng.uniform(0.16, 0.30)),
+        texture_contrast=texture_contrast,
         interface_jitter=float(rng.uniform(0.20, 0.40)),
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         directional_strength=float(rng.uniform(0.45, 0.75)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
+        mottle_field=mottle_field, choroid_field=choroid_field,
         vessels=vessels)
+
+
+def _texture_fields(rng, texture_contrast, choroid_contrast):
+    """Build the two volume-coherent 3-D texture fields (mottling + choroid) for a scene."""
+    from ..sample import CoherentField
+    mottle = CoherentField(rng, corr_z_um=18.0, corr_x_um=70.0, corr_y_um=300.0,
+                           contrast=texture_contrast)
+    choroid = CoherentField(rng, corr_z_um=90.0, corr_x_um=180.0, corr_y_um=420.0,
+                            contrast=choroid_contrast)
+    return mottle, choroid

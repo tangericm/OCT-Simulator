@@ -419,6 +419,9 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     undU = BoundaryUndulation.make(len(RETINA_LAYERS) + 2, rng,
                                    amp_um=float(np.clip(shape.undulation_rms_um * 1.1, 2.0, 9.0)),
                                    corr_um=float(rng.uniform(350.0, 600.0)))
+    from .anatomy.retina import _texture_fields
+    texture_contrast = float(rng.uniform(0.16, 0.30))
+    mottle_field, choroid_field = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
         center_y_um=float(rng.uniform(-100, 100)), undulation=undU,
@@ -428,10 +431,11 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
         disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
-        texture_contrast=float(rng.uniform(0.16, 0.30)), interface_jitter=float(rng.uniform(0.20, 0.40)),
+        texture_contrast=texture_contrast, interface_jitter=float(rng.uniform(0.20, 0.40)),
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         directional_strength=float(rng.uniform(0.45, 0.75)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
+        mottle_field=mottle_field, choroid_field=choroid_field,
         data_thickness=data_thick, data_ecc_um=shape.ecc_grid_um, vessels=vessels)
 
 

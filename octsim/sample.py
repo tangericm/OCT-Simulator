@@ -139,6 +139,7 @@ def build_reflectivity_from_boundaries(
     vitreous_backscatter: float = 0.0,
     layer_directional: np.ndarray | None = None,
     boundary_sharpness_um: float = 0.0,
+    texture_field: "CoherentField | None" = None,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -203,9 +204,15 @@ def build_reflectivity_from_boundaries(
     if texture_contrast > 0:
         tr0 = max(0, int(np.floor(opt_b[0].min() / dz)))
         tr1 = min(n_depth, int(np.ceil(opt_b[-1].max() / dz)) + 1)
-        gain = _smooth_gain(n_depth, n_x, rng, texture_contrast,
-                            max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0), band=(tr0, tr1))
-        backscatter_map = backscatter_map * gain
+        if texture_field is not None:
+            # volume-coherent: a fixed 3-D field sampled at this frame's slow position, so the
+            # mottling evolves smoothly across frames rather than flickering.
+            gain = texture_field.sample(depth_axis_um[tr0:tr1], x_axis_um, y_um)
+            backscatter_map[tr0:tr1] = backscatter_map[tr0:tr1] * gain
+        else:
+            gain = _smooth_gain(n_depth, n_x, rng, texture_contrast,
+                                max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0), band=(tr0, tr1))
+            backscatter_map = backscatter_map * gain
 
     # soften the layer edges: real inter-layer reflectivity transitions are gradual
     # (a biological gradient beyond the axial PSF), not step functions. Smoothing the
@@ -231,6 +238,40 @@ def build_reflectivity_from_boundaries(
             feat.apply(r, ctx)
 
     return _lateral_beam_filter(r, beam_waist_um / dx_um)
+
+
+class CoherentField:
+    """A smooth 3-D random gain field ``g(z, x, y) ≈ 1 ± contrast``, coherent in all axes.
+
+    A sum of ``k`` random-frequency cosines; sampling at a slow position ``y`` gives a 2-D
+    ``[n_z, n_x]`` gain that evolves **smoothly with y** (correlation length ~ ``corr_y_um``).
+    Stored once per volume on the anatomy model and sampled per frame, it makes the intra-layer
+    mottling and choroidal vascular pattern change contiguously across a volume instead of
+    flickering — they are fixed 3-D structures, not independent per-frame noise.
+    """
+
+    def __init__(self, rng: np.random.Generator, *, k: int = 8, corr_z_um: float = 30.0,
+                 corr_x_um: float = 80.0, corr_y_um: float = 350.0, contrast: float = 0.2):
+        u = lambda: rng.uniform(0.6, 2.0, k)
+        self.fz = (2.0 * np.pi) / (corr_z_um * u())
+        self.fx = (2.0 * np.pi) / (corr_x_um * u())
+        # y-frequencies are kept LOW (periods >= corr_y) so the field varies slowly across the
+        # slow axis — the correlation length in y is set by the shortest period, so a broad
+        # high-frequency spread here would decorrelate adjacent frames. ``corr_y_um`` should be
+        # several frame spacings for a smooth (non-flickering) volume.
+        self.fy = (2.0 * np.pi) / (corr_y_um * rng.uniform(1.0, 3.0, k))
+        self.ph = rng.uniform(0.0, 2.0 * np.pi, k)
+        self.w = rng.uniform(0.5, 1.0, k)
+        self.contrast = float(contrast)
+        self._norm = float(np.sqrt((self.w ** 2).sum())) or 1.0
+
+    def sample(self, z_um: np.ndarray, x_um: np.ndarray, y_um: float) -> np.ndarray:
+        z = np.asarray(z_um, float); x = np.asarray(x_um, float)
+        pz = self.fz[:, None] * z[None, :]                          # [k, nz]
+        px = self.fx[:, None] * x[None, :]                          # [k, nx]
+        ph = (self.fy * float(y_um) + self.ph)[:, None, None]       # [k, 1, 1]
+        field = (self.w[:, None, None] * np.cos(pz[:, :, None] + px[:, None, :] + ph)).sum(0)
+        return 1.0 + self.contrast * np.clip(field / self._norm, -2.5, 2.5)
 
 
 def _smooth1d(n: int, rng: np.random.Generator, sigma_px: float) -> np.ndarray:
