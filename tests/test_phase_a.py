@@ -107,10 +107,11 @@ def test_vectorized_lateral_filter_matches_reference_loop():
     r = (rng.standard_normal((64, 200)) + 1j * rng.standard_normal((64, 200)))
     waist_px = 6.0
     fast = _lateral_beam_filter(r, waist_px)
-    # explicit reference: np.pad reflect + per-row np.convolve valid
+    # explicit reference: np.pad reflect + per-row np.convolve valid.
+    # kernel is the beam AMPLITUDE profile exp(-t²/w²) (see _lateral_beam_filter).
     half = int(np.ceil(3.0 * waist_px))
     t = np.arange(-half, half + 1)
-    k = np.exp(-2.0 * (t / waist_px) ** 2)
+    k = np.exp(-((t / waist_px) ** 2))
     k = k / k.sum()
     pad = np.pad(r, ((0, 0), (half, half)), mode="reflect")
     ref = np.stack([np.convolve(pad[row], k, mode="valid") for row in range(r.shape[0])])

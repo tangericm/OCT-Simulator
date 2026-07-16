@@ -282,18 +282,22 @@ def build_reflectivity(
 
 
 def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:
-    """Convolve each depth row by the Gaussian beam amplitude profile (along x).
+    """Convolve each depth row by the Gaussian beam **amplitude** profile (along x).
 
-    Kernel ``exp(-2 t² / w²)`` (``1/e²`` waist ``w`` in pixels), sum-normalised so
-    smooth structure keeps its amplitude; reflect-padded at the edges. Filtering a
-    circular-complex-Gaussian field leaves it circular-complex-Gaussian, so speckle
-    stays fully developed but gains a grain size ~ the beam width.
+    ``r`` is the complex reflectivity *field*, so the kernel is the beam field-amplitude
+    profile ``exp(-t² / w²)`` with ``w`` the ``1/e²`` intensity waist in pixels — NOT the
+    intensity profile ``exp(-2t²/w²)``. This makes a point reflector image with intensity
+    FWHM ``√(2 ln2)·w`` = the reported :func:`~octsim.optics.waist_to_lateral_fwhm_um`; the
+    intensity kernel would image points √2 too sharp. Sum-normalised so smooth structure
+    keeps its amplitude; reflect-padded. Filtering a circular-complex-Gaussian field leaves
+    it circular-complex-Gaussian, so speckle stays fully developed but gains a grain size
+    ~ the beam width.
     """
     if waist_px <= 0.5 or r.shape[1] < 3:
         return r
     half = max(1, int(np.ceil(3.0 * waist_px)))
     t = np.arange(-half, half + 1)
-    k = np.exp(-2.0 * (t / waist_px) ** 2)
+    k = np.exp(-((t / waist_px) ** 2))
     k = k / k.sum()
     # Vectorized separable convolution along x via scipy (falls back to numpy):
     # convolve1d over axis=1 in one call instead of a per-depth-row Python loop.

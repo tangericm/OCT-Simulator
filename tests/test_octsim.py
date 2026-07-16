@@ -127,6 +127,31 @@ def test_noise_floor_raises_background():
     assert np.abs(noisy.bscan[deep]).mean() > np.abs(clean.bscan[deep]).mean()
 
 
+def test_lateral_psf_matches_reported_resolution():
+    """The beam filter convolves the complex FIELD with the AMPLITUDE profile, so a
+    point reflector images with intensity FWHM == waist_to_lateral_fwhm_um(waist).
+
+    (The intensity-profile kernel exp(-2t²/w²) would image points √2 too sharp.)"""
+    from octsim.optics import waist_to_lateral_fwhm_um
+    from octsim.sample import _lateral_beam_filter
+
+    dx_um = 0.25
+    waist_um = 15.0
+    n_x = 4001
+    field = np.zeros((1, n_x), dtype=np.complex128)
+    field[0, n_x // 2] = 1.0
+    inten = np.abs(_lateral_beam_filter(field, waist_um / dx_um)[0]) ** 2
+    half = inten.max() / 2.0
+    above = np.where(inten >= half)[0]
+    # linear-interpolate the two half-max crossings for a sub-pixel FWHM
+    lo, hi = above[0], above[-1]
+    xl = lo - (half - inten[lo]) / (inten[lo - 1] - inten[lo])
+    xr = hi + (half - inten[hi]) / (inten[hi + 1] - inten[hi])
+    fwhm_um = (xr - xl) * dx_um
+    assert abs(fwhm_um - waist_to_lateral_fwhm_um(waist_um)) < 0.3, (
+        fwhm_um, waist_to_lateral_fwhm_um(waist_um))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

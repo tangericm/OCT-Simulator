@@ -92,9 +92,9 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     if a == "mirror":
         return presets.mirror(depth_um=config.sample_depth_um)
     if a == "paper":
-        return presets.paper()
+        return presets.paper(surface_um=config.sample_depth_um)
     if a == "cornea":
-        return presets.cornea()
+        return presets.cornea(surface_um=config.sample_depth_um)
     raise ValueError(f"unknown anatomy {a!r}")
 
 

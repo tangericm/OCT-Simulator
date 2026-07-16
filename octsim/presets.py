@@ -37,13 +37,13 @@ def mirror(depth_um: float = 400.0, reflectivity: float = 0.95) -> Sample:
     )
 
 
-def paper(thickness_um: float = 300.0) -> Sample:
+def paper(thickness_um: float = 300.0, surface_um: float = 150.0) -> Sample:
     """A dense turbid slab — bright surface, strong fully-developed speckle, and
     a steep Beer–Lambert roll-off. The canonical speckle-statistics target."""
     return Sample(
         name="paper",
         top_n=1.0,
-        surface_um=150.0,
+        surface_um=surface_um,
         layers=[
             Layer("paper", thickness_um=thickness_um, n=1.5,
                   backscatter=6.0e-2, mu_s_per_mm=25.0, density_per_um2=1.2),
@@ -51,7 +51,7 @@ def paper(thickness_um: float = 300.0) -> Sample:
     )
 
 
-def cornea() -> Sample:
+def cornea(surface_um: float = 150.0) -> Sample:
     """Anterior segment: bright anterior/posterior surfaces bracketing a nearly
     transparent (weakly scattering) stroma, with a gentle anterior curvature."""
     R_um = 7800.0                      # anterior corneal radius of curvature
@@ -74,7 +74,7 @@ def cornea() -> Sample:
         return (xc * xc) / (2.0 * R_um)     # shallow parabolic sag
 
     return Sample(name="cornea", layers=layers, top_n=1.0,
-                  surface_um=150.0, curvature=curvature)
+                  surface_um=surface_um, curvature=curvature)
 
 
 def macula() -> Sample:
