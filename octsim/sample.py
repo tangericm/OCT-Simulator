@@ -138,6 +138,7 @@ def build_reflectivity_from_boundaries(
     interface_jitter: float = 0.0,
     vitreous_backscatter: float = 0.0,
     layer_directional: np.ndarray | None = None,
+    boundary_sharpness_um: float = 0.0,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -205,6 +206,20 @@ def build_reflectivity_from_boundaries(
         gain = _smooth_gain(n_depth, n_x, rng, texture_contrast,
                             max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0), band=(tr0, tr1))
         backscatter_map = backscatter_map * gain
+
+    # soften the layer edges: real inter-layer reflectivity transitions are gradual
+    # (a biological gradient beyond the axial PSF), not step functions. Smoothing the
+    # deterministic amplitude MAP (not the speckle field) blurs the too-crisp band edges
+    # while leaving speckle fully developed. Driven by a measured boundary width.
+    if boundary_sharpness_um > 0:
+        sigma_px = boundary_sharpness_um / dz
+        if sigma_px > 0.3:
+            try:
+                from scipy.ndimage import gaussian_filter1d
+                backscatter_map = gaussian_filter1d(backscatter_map, sigma_px, axis=0,
+                                                    mode="nearest")
+            except Exception:
+                pass
 
     g = (rng.standard_normal((n_depth, n_x))
          + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)

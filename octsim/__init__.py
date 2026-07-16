@@ -25,7 +25,8 @@ Low-level API (build a scene by hand)::
 
 from __future__ import annotations
 
-from . import presets
+from . import calibration, presets
+from .calibration import CalibrationProfile, extract_profile, literature_profile, retina_from_profile
 from .config import ResolvedConfig, SimConfig, config_from_mapping
 from .forward import synthesize_ascan_spectrum, synthesize_bscan_spectra
 from .generate import SampleResult, generate_dataset, simulate
@@ -58,6 +59,12 @@ __all__ = [
     "BscanResult",
     "simulate_bscan",
     "presets",
+    # data-driven calibration
+    "calibration",
+    "CalibrationProfile",
+    "literature_profile",
+    "extract_profile",
+    "retina_from_profile",
 ]
 
 __version__ = "0.2.0"

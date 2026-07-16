@@ -137,7 +137,8 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 texture_contrast=cross.texture_contrast,
                 interface_jitter=cross.interface_jitter,
                 vitreous_backscatter=cross.vitreous_backscatter,
-                layer_directional=cross.layer_directional)
+                layer_directional=cross.layer_directional,
+                boundary_sharpness_um=cross.boundary_sharpness_um)
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
 

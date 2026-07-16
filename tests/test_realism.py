@@ -75,8 +75,9 @@ def test_directional_reflectance_fades_photoreceptors_but_not_rpe():
     the layer tilts (periphery); the melanin-rich RPE stays angle-stable."""
     from octsim.anatomy.retina import RetinaModel, RETINA_LAYERS
 
+    # steep curvature so the photoreceptor band is clearly tilted at the scan edge
     m = RetinaModel(location="macula", center_x_um=3000.0, directional_strength=0.7,
-                    curvature_radius_um=18000.0, vessels=[])
+                    curvature_radius_um=8000.0, curvature_sag_um=600.0, vessels=[])
     x = np.linspace(0.0, 6000.0, 400)
     cross = m.cross_section(0.0, x, 1050.0)
     gain = cross.layer_directional
