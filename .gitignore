@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated example output (B-scans, spectra, labels)
+examples/output/
+output/
+*.png
+*.tif
+*.tiff
+*.npy

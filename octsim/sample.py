@@ -1,0 +1,181 @@
+"""Layered sample model and complex-reflectivity-field generation.
+
+A sample is an ordered stack of :class:`Layer` objects beneath a top medium
+(air for cornea/paper/mirror, vitreous for retina). The physical model turns
+that stack into a **complex reflectivity field** ``r[z, x]`` sampled on the
+reconstruction depth grid — the object the OCT actually measures at its own
+resolution. Two contributions:
+
+* **Volume speckle** — within a layer, each resolution cell holds a *circular
+  complex-Gaussian* reflectivity whose amplitude scales with the layer's
+  ``backscatter`` and a round-trip Beer–Lambert attenuation ``exp(-μ_t·d)``.
+  This is the central-limit-theorem limit of summing many random sub-resolution
+  scatterers per cell, and it is exactly the fully-developed-speckle model
+  (magnitude is Rayleigh, intensity contrast 1). Convolving the field laterally
+  by the beam gives speckle its correct grain size and imposes the lateral PSF.
+* **Specular interfaces** — every layer boundary adds a deterministic-phase
+  reflector at the boundary depth with a Fresnel amplitude
+  ``r = (n1 - n2)/(n1 + n2)`` (or an explicit override), rendering as a bright,
+  laterally-coherent line (mirrors, crisp cornea/retina boundaries).
+
+Depths are tracked in two units: *physical* depth (µm; drives attenuation and
+geometry) and *optical* depth (``Σ n·dz``; drives interferometric phase and so
+where a feature reconstructs).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable
+
+import numpy as np
+
+
+@dataclass
+class Layer:
+    """One homogeneous slab.
+
+    Attributes
+    ----------
+    name : label (also used for the segmentation mask).
+    thickness_um : physical thickness.
+    n : group refractive index (sets optical path / apparent depth).
+    backscatter : volume backscatter amplitude scale (relative units; sets how
+        bright the layer's speckle is). 0 disables volume scatter (e.g. a mirror).
+    mu_s_per_mm : scattering/attenuation coefficient driving the Beer–Lambert
+        depth roll-off (amplitude ``exp(-μ_t·d_physical)``, μ_t in 1/µm).
+    density_per_um2 : retained as a physical descriptor; with the complex-Gaussian
+        cell model it only gates whether a layer scatters (``> 0``). The speckle
+        realisation is set by ``backscatter`` and the random field.
+    interface_reflectivity : explicit field reflectivity of this layer's TOP
+        boundary. ``None`` -> computed from the Fresnel index mismatch.
+    """
+
+    name: str
+    thickness_um: float
+    n: float = 1.38
+    backscatter: float = 1.0e-2
+    mu_s_per_mm: float = 3.0
+    density_per_um2: float = 0.25
+    interface_reflectivity: float | None = None
+
+    @property
+    def mu_t_per_um(self) -> float:
+        return self.mu_s_per_mm * 1e-3
+
+
+@dataclass
+class Sample:
+    """A stack of layers plus geometry.
+
+    ``top_n`` is the medium above the first layer (1.0 air, ~1.336 vitreous).
+    ``surface_um`` sets the physical depth of the first interface so the
+    structure sits inside the imaging window. ``curvature`` is an optional
+    ``x -> Δz`` callable (µm) added to every boundary — cornea's arc, the
+    macular contour.
+    """
+
+    name: str
+    layers: list[Layer]
+    top_n: float = 1.0
+    surface_um: float = 120.0
+    curvature: Callable[[np.ndarray], np.ndarray] | None = None
+    _meta: dict = field(default_factory=dict)
+
+    def boundary_depths_um(self, x: np.ndarray) -> np.ndarray:
+        """Physical depth of every interface at each ``x`` — shape ``[L+1, len(x)]``."""
+        x = np.atleast_1d(x)
+        base = np.array([0.0] + [ly.thickness_um for ly in self.layers]).cumsum()
+        depths = self.surface_um + base[:, None] + np.zeros((1, x.size))
+        if self.curvature is not None:
+            depths = depths + self.curvature(x)[None, :]
+        return depths
+
+    def optical_boundary_depths_um(self, x: np.ndarray) -> np.ndarray:
+        """Optical-path depth of every interface (``Σ n·dz`` from the top)."""
+        x = np.atleast_1d(x)
+        thick_opt = np.array([0.0] + [ly.n * ly.thickness_um for ly in self.layers])
+        base = thick_opt.cumsum()
+        opt = self.top_n * self.surface_um + base[:, None] + np.zeros((1, x.size))
+        if self.curvature is not None:
+            opt = opt + (self.top_n * self.curvature(x))[None, :]
+        return opt
+
+
+def build_reflectivity(
+    sample: Sample,
+    depth_axis_um: np.ndarray,
+    x_axis_um: np.ndarray,
+    *,
+    beam_waist_um: float,
+    lateral_extent_um: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Complex reflectivity field ``r[n_depth, n_x]`` on the reconstruction grid.
+
+    Volume speckle is drawn as a circular complex-Gaussian per cell (scaled by
+    layer backscatter and attenuation); specular interfaces are added as
+    deterministic bright lines; the whole field is then convolved laterally by
+    the beam amplitude profile, which sets both the lateral resolution and the
+    lateral speckle grain.
+    """
+    depth_axis_um = np.asarray(depth_axis_um, float)
+    x_axis_um = np.asarray(x_axis_um, float)
+    n_depth = depth_axis_um.size
+    n_x = x_axis_um.size
+    dz = float(depth_axis_um[1] - depth_axis_um[0]) if n_depth > 1 else 1.0
+
+    d = depth_axis_um[:, None]                              # [n_depth, 1]
+    opt_b = sample.optical_boundary_depths_um(x_axis_um)    # [L+1, n_x]
+    r = np.zeros((n_depth, n_x), dtype=np.complex128)
+
+    cum_mu = 0.0                                            # amplitude attenuation above this layer
+    cols = np.arange(n_x)
+    for i, layer in enumerate(sample.layers):
+        top_opt = opt_b[i][None, :]
+        bot_opt = opt_b[i + 1][None, :]
+        mask = (d >= top_opt) & (d < bot_opt)
+
+        # one-way amplitude attenuation to each cell (physical path)
+        d_in_layer_phys = np.clip(d - top_opt, 0.0, None) / layer.n
+        atten = np.exp(-(cum_mu + layer.mu_t_per_um * d_in_layer_phys))
+
+        if layer.backscatter > 0 and layer.density_per_um2 > 0:
+            g = (rng.standard_normal((n_depth, n_x))
+                 + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+            r += np.where(mask, g * (layer.backscatter * atten), 0.0)
+
+        r_if = layer.interface_reflectivity
+        if r_if is None:
+            n_above = sample.top_n if i == 0 else sample.layers[i - 1].n
+            r_if = (n_above - layer.n) / (n_above + layer.n)
+        if abs(r_if) > 1e-6:
+            bins = np.clip(np.round(opt_b[i] / dz).astype(np.intp), 0, n_depth - 1)
+            r[bins, cols] += r_if * np.exp(-cum_mu)
+
+        cum_mu += layer.mu_t_per_um * layer.thickness_um
+
+    dx_um = lateral_extent_um / (n_x - 1) if n_x > 1 else 1.0
+    return _lateral_beam_filter(r, beam_waist_um / dx_um)
+
+
+def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:
+    """Convolve each depth row by the Gaussian beam amplitude profile (along x).
+
+    Kernel ``exp(-2 t² / w²)`` (``1/e²`` waist ``w`` in pixels), sum-normalised so
+    smooth structure keeps its amplitude; reflect-padded at the edges. Filtering a
+    circular-complex-Gaussian field leaves it circular-complex-Gaussian, so speckle
+    stays fully developed but gains a grain size ~ the beam width.
+    """
+    if waist_px <= 0.5 or r.shape[1] < 3:
+        return r
+    half = max(1, int(np.ceil(3.0 * waist_px)))
+    t = np.arange(-half, half + 1)
+    k = np.exp(-2.0 * (t / waist_px) ** 2)
+    k = k / k.sum()
+    pad = np.pad(r, ((0, 0), (half, half)), mode="reflect")
+    # row-wise 'valid' convolution -> same length as r along x
+    out = np.empty_like(r)
+    for row in range(r.shape[0]):
+        out[row] = np.convolve(pad[row], k, mode="valid")
+    return out
