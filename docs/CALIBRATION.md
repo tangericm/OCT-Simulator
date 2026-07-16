@@ -113,6 +113,34 @@ thickness ratios (`calibration._layer_split_map`); the choroid stays parametric.
 refits on **your Maestro segmentations** — write a loader that yields a `[N, n_layer, n_ecc]`
 thickness stack (see `octsim/data/jhu_hc.py`) and call `LayerShapeModel.fit`.
 
+## Learning from UNLABELED B-scans (texture, heterogeneity, reflectivity)
+
+Segmentations tell us *where* the layers are; a pile of plain B-scans tells us how the retina
+actually *looks*. `octsim/data/unlabeled.py` extracts, with a label-free ILM+RPE surface finder:
+a **reflectivity template** (mean A-line warped onto a normalised ILM→RPE axis — its peaks are
+the bright layers), the **speckle contrast** and grain, the intra-layer **heterogeneity**, the
+noise floor, the retinal-thickness spread, and the **curvature sign**.
+
+```python
+from octsim import extract_texture, bundled_texture
+from octsim.data import unlabeled as ul
+prof = extract_texture(ul.load_images("path/to/NORMAL"))     # any OCT image folder, no labels
+prof = bundled_texture()                                     # Srinivasan-2014 NORMAL, 1407 B-scans
+```
+```bash
+python scripts/fit_texture.py --root path/to/NORMAL --out octsim/data/texture_srinivasan.json
+```
+
+Fitted on the 1407 **Srinivasan-2014 NORMAL** B-scans, this **validated the physics model**:
+measured speckle contrast **0.527** (≈ the fully-developed-speckle Rayleigh value 0.52),
+**79 % of scans concave-up** (confirming the posterior-pole bowl curvature), retinal thickness
+**331 ± 71 µm**, and the correct bright/dark band ordering (NFL & RPE brightest, ONL darkest).
+`layer_reflectivity_from_template(prof, names, thicknesses)` reads relative per-layer brightness
+off the template — data-grounded optics **without segmentation**. **Caveat:** the template lives
+in the log/dB *display* domain, so it validates layer *ordering* and *shape* but its compressed
+ratios are not raw linear backscatter; the speckle/heterogeneity/thickness/curvature numbers are
+directly comparable. Point the loader at Kermany OCT2017 NORMAL, OCTID, or OCTDL to pool more.
+
 ## Field of view and the optic nerve head
 
 The healthy-eye shape model is fit out to **±2.6 mm eccentricity** (using the full width of each
