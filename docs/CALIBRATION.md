@@ -131,15 +131,22 @@ prof = bundled_texture()                                     # Srinivasan-2014 N
 python scripts/fit_texture.py --root path/to/NORMAL --out octsim/data/texture_srinivasan.json
 ```
 
-Fitted on the 1407 **Srinivasan-2014 NORMAL** B-scans, this **validated the physics model**:
-measured speckle contrast **0.527** (≈ the fully-developed-speckle Rayleigh value 0.52),
-**79 % of scans concave-up** (confirming the posterior-pole bowl curvature), retinal thickness
-**331 ± 71 µm**, and the correct bright/dark band ordering (NFL & RPE brightest, ONL darkest).
-`layer_reflectivity_from_template(prof, names, thicknesses)` reads relative per-layer brightness
-off the template — data-grounded optics **without segmentation**. **Caveat:** the template lives
-in the log/dB *display* domain, so it validates layer *ordering* and *shape* but its compressed
-ratios are not raw linear backscatter; the speckle/heterogeneity/thickness/curvature numbers are
-directly comparable. Point the loader at Kermany OCT2017 NORMAL, OCTID, or OCTDL to pool more.
+The bundled default (`bundled_texture()`) is a **pooled multi-dataset prior** — 1739 NORMAL
+B-scans across **two devices**: [Srinivasan-2014](http://www.duke.edu/~sf59/Srinivasan_BOE_2014_dataset.htm)
+(Spectralis, 1407) + [OCTDL](https://zenodo.org/records/10839556) (Optovue NO class, 332),
+combined with `pool_textures()` (weighted by B-scan count; `bundled_texture("srinivasan")` /
+`"octdl"` load the singles). Both devices show the same band structure (NFL peak → ONL dip →
+RPE peak); the pool averages their display/contrast differences.
+
+This **validated the physics model**: measured speckle contrast **0.51** (≈ the fully-developed-
+speckle Rayleigh value 0.52), **82 % of scans concave-up** (95 % in OCTDL alone — confirming the
+posterior-pole bowl curvature), normal retinal thickness, and the correct bright/dark band
+ordering (NFL & RPE brightest, ONL darkest). `layer_reflectivity_from_template(prof, names,
+thicknesses)` reads relative per-layer brightness off the template — data-grounded optics
+**without segmentation**. **Caveat:** the template lives in the log/dB *display* domain, so it
+validates layer *ordering* and *shape* but its compressed ratios are not raw linear backscatter;
+the speckle/heterogeneity/thickness/curvature numbers are directly comparable. Pool more with
+`pool_textures([...])` — point `scripts/fit_texture.py` at Kermany OCT2017 NORMAL, OCTID, etc.
 
 ## Field of view and the optic nerve head
 
