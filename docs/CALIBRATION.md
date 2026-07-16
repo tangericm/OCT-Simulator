@@ -113,10 +113,33 @@ thickness ratios (`calibration._layer_split_map`); the choroid stays parametric.
 refits on **your Maestro segmentations** — write a loader that yields a `[N, n_layer, n_ecc]`
 thickness stack (see `octsim/data/jhu_hc.py`) and call `LayerShapeModel.fit`.
 
+## Field of view and the optic nerve head
+
+The healthy-eye shape model is fit out to **±2.6 mm eccentricity** (using the full width of each
+foveal B-scan, not just the central pit), so wide scans get a real foveal→parafoveal→perifoveal
+thickness profile (foveal ~250 µm rising to a ~320 µm perifoveal plateau, GCIP peaking
+parafoveally, RNFL thickening outward).
+
+`RetinaModel` carries **both** a fovea and an optic disc at their anatomical separation
+(`disc_dx_um` ≈ 4.76 mm). When a scan is wide enough to reach the disc (≳ 7–8 mm) or is
+ONH-centred, `cross_section` renders a **unified field**: the data-driven macula transitions into
+the disc, where the layers terminate at Bruch's-membrane opening, the ILM cups, the RNFL rim
+thickens, and a neural-canal fill replaces the neurosensory stack — the hallmark ONH morphology,
+on the same B-scan as the fovea. Narrow macula scans keep the fast 11-layer path unchanged.
+
+The **disc geometry is literature-parametric** (BMO half-width, cup depth, rim), not data-fit:
+the one public ONH layer+disc dataset ([MGU-Net](https://github.com/Jiaxuan-Li/MGU-Net), 122
+radial through-disc B-scans) is Cloudflare-gated (not reachable from this environment) and is
+mixed-pathology (high myopia / peripapillary atrophy), so it is unsuitable as a healthy prior
+anyway. When ONH segmentations are available locally, the same `LayerShapeModel` machinery can
+calibrate the disc dimensions.
+
 ## Roadmap
 
 - **Done:** per-layer optics + curvature + boundary sharpness from data; a PCA shape model that
-  samples real foveal-pit / thickness geometry from a **healthy-eye** dataset (default) or a DME
-  one; both wired into the config/GUI with a parametric opt-out.
-- **Next:** learn the global curvature + ONL foveal bulge as modes; a foveal-vs-parafoveal
-  sampling knob; extract linear-domain optics from Maestro `.raw` reconstructions.
+  samples real foveal-pit / thickness geometry from a **healthy-eye** dataset (default, ±2.6 mm)
+  or a DME one; a unified fovea+disc field so the ONH appears at wide FOV; all wired into the
+  config/GUI with a parametric opt-out.
+- **Next:** a foveal-vs-parafoveal sampling knob (bias the mode-1 latent); learn the global
+  curvature + ONL bulge as modes; calibrate the disc from local ONH segmentations; extract
+  linear-domain optics from Maestro `.raw` reconstructions.

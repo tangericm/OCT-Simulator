@@ -74,7 +74,7 @@ def load_annotated(root: str, *, groups=("hc",)):
     return out
 
 
-def thickness_stack(records, *, n_ecc: int = 151, half_width_um: float = 1500.0,
+def thickness_stack(records, *, n_ecc: int = 201, half_width_um: float = 2600.0,
                     min_total_um: float = 240.0, max_total_um: float = 360.0,
                     min_pit_depth_um: float = 55.0):
     """Fovea-aligned ``[N, 8, n_ecc]`` thickness stack + eccentricity grid (µm).
