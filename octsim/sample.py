@@ -137,6 +137,7 @@ def build_reflectivity_from_boundaries(
     texture_contrast: float = 0.0,
     interface_jitter: float = 0.0,
     vitreous_backscatter: float = 0.0,
+    layer_directional: np.ndarray | None = None,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -167,7 +168,10 @@ def build_reflectivity_from_boundaries(
         d_in_phys = np.clip(d - top_opt, 0.0, None) / layer_n[i]
         atten = np.exp(-(cum_mu[None, :] + layer_mu_t[i] * d_in_phys))
         if layer_backscatter[i] > 0:
-            backscatter_map[mask] = (layer_backscatter[i] * atten)[mask]
+            bmap_i = layer_backscatter[i] * atten
+            if layer_directional is not None:   # per-column directional reflectance
+                bmap_i = bmap_i * layer_directional[i][None, :]
+            backscatter_map[mask] = bmap_i[mask]
 
         r_if = layer_interface[i]
         if r_if is None:

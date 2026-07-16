@@ -92,6 +92,7 @@ class CrossSection:
     texture_contrast: float = 0.0        # slow intra-layer mottling depth
     interface_jitter: float = 0.0        # lateral break-up of specular interfaces
     vitreous_backscatter: float = 0.0    # faint fill above the ILM (not pure black)
+    layer_directional: object = None     # [L, n_x] per-column directional gain (or None)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -168,6 +169,9 @@ class RetinaModel:
     texture_contrast: float = 0.22       # slow intra-layer mottling depth
     interface_jitter: float = 0.30       # lateral break-up of specular interfaces
     vitreous_backscatter: float = 5.0e-4  # faint vitreous fill (not pure black)
+    # directional reflectance
+    directional_strength: float = 0.6    # 0 = isotropic; scales SC + Henle effects
+    henle_sign: float = 0.0              # -1..1 pupil-offset sign of the HFL asymmetry
 
     def cross_section(self, y_um: float, x_axis_um: np.ndarray,
                       wavelength_nm: float = REF_WAVELENGTH_NM) -> CrossSection:
@@ -178,7 +182,52 @@ class RetinaModel:
         cross.texture_contrast = self.texture_contrast
         cross.interface_jitter = self.interface_jitter
         cross.vitreous_backscatter = self.vitreous_backscatter
+        groups = [ly.group for ly in self.layers] if self.location != "onh" \
+            else self._onh_groups(len(cross.label_names))
+        cross.layer_directional = self._directional_gain(
+            cross.opt_b, np.asarray(x_axis_um, float), groups)
         return cross
+
+    @staticmethod
+    def _onh_groups(n: int) -> list:
+        by_name = {ly.name: ly.group for ly in RETINA_LAYERS}
+        order = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL",
+                 "ELM", "EZ", "IZ", "RPE", "choroid"]
+        return [by_name.get(name, "canal") for name in order[:n]]
+
+    def _directional_gain(self, opt_b: np.ndarray, x: np.ndarray, groups: list):
+        """Per-column, per-layer directional reflectance gain ``[L, n_x]`` (or None).
+
+        Physically the backscatter of oriented structures depends on the beam's local
+        angle of incidence. Two clinically dominant cues are modelled; everything else
+        (RPE especially) stays angle-stable so the EZ/IZ *wings* fade while the RPE
+        holds bright:
+
+        * **Photoreceptors (ELM/EZ/IZ)** — Stiles–Crawford: brightest where the band is
+          perpendicular to the beam (flat, near the fovea), falling to a floor where the
+          layer tilts (periphery, pit walls). Gain ``floor + (1-floor)·exp(-(θ/θ0)²)``.
+        * **Henle fibre layer (ONL)** — a pupil-offset-dependent asymmetry about the
+          fovea: one side brightens, the other darkens (``1 + sign·a·tanh((x-xc)/w)``).
+        """
+        if self.directional_strength <= 0:
+            return None
+        L = len(groups)
+        n_x = x.size
+        if n_x < 2:
+            return None
+        gain = np.ones((L, n_x))
+        s = float(self.directional_strength)
+        dx = (x[-1] - x[0]) / (n_x - 1)
+        xc = x - self.center_x_um
+        for i, g in enumerate(groups):
+            if g == "photoreceptor":
+                mid = 0.5 * (opt_b[i] + opt_b[i + 1])
+                theta = np.gradient(mid, dx) / self.top_n     # ~tan(incidence), rad
+                floor = 1.0 - 0.7 * s
+                gain[i] = floor + (1.0 - floor) * np.exp(-(theta / 0.11) ** 2)
+            elif g == "onl":
+                gain[i] = 1.0 + self.henle_sign * 0.35 * s * np.tanh(xc / 350.0)
+        return gain
 
     @staticmethod
     def _layer_optics(layers, wavelength_nm):
@@ -380,4 +429,6 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         texture_contrast=float(rng.uniform(0.16, 0.30)),
         interface_jitter=float(rng.uniform(0.20, 0.40)),
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
+        directional_strength=float(rng.uniform(0.45, 0.75)),
+        henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
         vessels=vessels)

@@ -67,6 +67,22 @@ def test_generate_dataset_yields_distinct_reproducible_samples():
     assert not np.allclose(a[0].bscan, c[0].bscan)
 
 
+def test_spectra_are_retained_and_reconstruct_the_bscan():
+    """The image is FFT-grounded: the retained detector spectra I(k,x) reconstruct
+    (to float32) to exactly the displayed A-scans — provably the source of the B-scan."""
+    from octsim.reconstruct import reconstruct_bscan
+    res = simulate(_cfg(anatomy="macula", scan_pattern="bscan"), seed=1)
+    assert res.spectra is not None
+    n_k = res.resolved.source.n_k
+    assert res.spectra.shape == (n_k, 96)             # [pixels/spectrum, lines]
+    assert res.k_axis_rad_per_um.shape == (n_k,)
+    peak = np.abs(res.volume).max()
+    for col in (10, 48, 80):
+        recon = np.abs(reconstruct_bscan(res.spectra[:, col]))
+        recon_db = np.clip(20 * np.log10(np.maximum(recon.ravel() / peak, 1e-12)), -60, 0)
+        assert np.max(np.abs(recon_db - res.ascan_db(col))) < 1e-3
+
+
 def test_faster_acquisition_lowers_snr():
     # shot-limited SNR ~ sqrt(T_int): faster line rate -> shorter T_int -> lower SNR
     def deep_bg_ratio(rate):

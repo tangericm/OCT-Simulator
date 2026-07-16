@@ -70,6 +70,32 @@ def test_averages_default_is_raw():
     assert SimConfig().averages == 1
 
 
+def test_directional_reflectance_fades_photoreceptors_but_not_rpe():
+    """Stiles-Crawford: the EZ/IZ band is brightest where flat (fovea) and fades where
+    the layer tilts (periphery); the melanin-rich RPE stays angle-stable."""
+    from octsim.anatomy.retina import RetinaModel, RETINA_LAYERS
+
+    m = RetinaModel(location="macula", center_x_um=3000.0, directional_strength=0.7,
+                    curvature_radius_um=18000.0, vessels=[])
+    x = np.linspace(0.0, 6000.0, 400)
+    cross = m.cross_section(0.0, x, 1050.0)
+    gain = cross.layer_directional
+    assert gain is not None
+    centre = int(np.argmin(np.abs(x - 3000.0)))
+    edge = 0
+    groups = [ly.group for ly in RETINA_LAYERS]
+    ez = groups.index("photoreceptor")               # first photoreceptor band (ELM/EZ/IZ)
+    rpe = groups.index("rpe")
+    # photoreceptor gain drops from the flat fovea to the tilted periphery
+    assert gain[ez][centre] > 1.25 * gain[ez][edge], (gain[ez][centre], gain[ez][edge])
+    # RPE stays angle-stable across the whole width
+    assert np.ptp(gain[rpe]) < 1e-6, np.ptp(gain[rpe])
+    # disabling the effect removes the field entirely
+    m0 = RetinaModel(location="macula", center_x_um=3000.0, directional_strength=0.0,
+                     vessels=[])
+    assert m0.cross_section(0.0, x, 1050.0).layer_directional is None
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

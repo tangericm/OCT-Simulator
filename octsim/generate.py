@@ -46,6 +46,18 @@ class SampleResult:
     params: dict
     seed_key: int
     motion_dz_um: np.ndarray | None = None   # [n_frames*lines] trajectory (or None)
+    #: the actual detector interferogram I(k, x) of frame 0 — the raw spectra the
+    #: displayed B-scan is the FFT reconstruction of (incl. noise). [n_k, n_x] float32.
+    spectra: np.ndarray | None = None
+
+    @property
+    def k_axis_rad_per_um(self) -> np.ndarray:
+        """Wavenumber grid (rad/µm) the retained ``spectra`` are sampled on."""
+        return self.resolved.source.k_grid()
+
+    def ascan_db(self, col: int) -> np.ndarray:
+        """Reconstructed A-scan (dB, 0 dB at the volume peak) for one lateral column."""
+        return self.bscan_db[:, int(col)]
 
     @property
     def is_volume(self) -> bool:
@@ -124,7 +136,8 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 lateral_extent_um=fov, rng=rng, features=cross.features, y_um=y_um,
                 texture_contrast=cross.texture_contrast,
                 interface_jitter=cross.interface_jitter,
-                vitreous_backscatter=cross.vitreous_backscatter)
+                vitreous_backscatter=cross.vitreous_backscatter,
+                layer_directional=cross.layer_directional)
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
 
@@ -166,6 +179,7 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     labels = np.empty((n_frames, n_depth, n_x), dtype=np.uint8)
 
     navg = max(1, int(resolved.averages))
+    first_spectra = None
     for f in range(n_frames):
         y = float(y_axis[f]) if f < y_axis.size else 0.0
         build, lab = _frame_reflectivity_builder(scene, resolved, x_axis, y)
@@ -182,15 +196,22 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
                 falloff_6db_um=resolved.falloff_6db_um,
                 dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
                 motion_dz_um=dz, washout_gain=wg, column_phase=phase)
-            return reconstruct_bscan(resolved.noise.apply(spectra, rng_))
+            noisy = resolved.noise.apply(spectra, rng_)   # the digitised detector spectra
+            return reconstruct_bscan(noisy), noisy
 
         if navg > 1:  # incoherent (magnitude) averaging — raw speckle reduced, ART-like
             acc = np.zeros((n_depth, n_x))
-            for _ in range(navg):
-                acc += np.abs(one(rng))
+            for a in range(navg):
+                recon, noisy = one(rng)
+                acc += np.abs(recon)
+                if f == 0 and a == 0:
+                    first_spectra = noisy
             volume[f] = (acc / navg).astype(np.complex64)
         else:
-            volume[f] = one(rng).astype(np.complex64)
+            recon, noisy = one(rng)
+            volume[f] = recon.astype(np.complex64)
+            if f == 0:
+                first_spectra = noisy
 
     peak = np.abs(volume).max() or 1.0
     volume_db = np.clip(20.0 * np.log10(np.maximum(np.abs(volume) / peak, 1e-12)), -60.0, 0.0)
@@ -198,7 +219,8 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     return SampleResult(
         volume=volume, volume_db=volume_db, label_map=labels, depth_axis_um=depth,
         x_axis_um=x_axis, y_axis_um=y_axis, resolved=resolved, params=_scene_params(scene),
-        seed_key=_seed_key(rng), motion_dz_um=(motion.dz_um if moving else None))
+        seed_key=_seed_key(rng), motion_dz_um=(motion.dz_um if moving else None),
+        spectra=(first_spectra.astype(np.float32) if first_spectra is not None else None))
 
 
 def _seed_key(rng: np.random.Generator) -> int:
