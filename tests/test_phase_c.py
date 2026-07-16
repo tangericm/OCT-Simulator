@@ -1,0 +1,111 @@
+"""Phase C checks: 3D retinal anatomy (foveal pit, layers, vessel shadow, ONH)."""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from octsim import LightSource, reconstruct_bscan  # noqa: E402
+from octsim.anatomy import default_retina, random_retina  # noqa: E402
+from octsim.anatomy.retina import RetinaModel  # noqa: E402
+from octsim.forward import synthesize_bscan_spectra  # noqa: E402
+from octsim.sample import build_reflectivity_from_boundaries  # noqa: E402
+
+FOV = 1000.0
+INNER = (1, 2, 3, 4)  # GCL, IPL, INL, OPL
+
+
+def _render(model, *, n_x=256, y=0.0, seed=0, beam=12.0, n_k=1024):
+    src = LightSource(n_k=n_k)
+    depth = src.depth_axis_um()
+    x = np.linspace(0.0, FOV, n_x)
+    cross = model.cross_section(y, x)
+    r = build_reflectivity_from_boundaries(
+        cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
+        layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
+        layer_interface=cross.layer_interface, top_n=cross.top_n,
+        depth_axis_um=depth, x_axis_um=x, beam_waist_um=beam, lateral_extent_um=FOV,
+        rng=np.random.default_rng(seed), features=cross.features, y_um=y)
+    return np.abs(reconstruct_bscan(synthesize_bscan_spectra(r, src))), depth, x, cross
+
+
+def test_foveal_pit_thins_inner_layers_at_centre():
+    m = RetinaModel(location="macula", center_x_um=FOV / 2, vessels=[])
+    x = np.linspace(0.0, FOV, 256)
+    cross = m.cross_section(0.0, x)
+    centre = int(np.argmin(np.abs(x - FOV / 2)))
+    edge = 0
+    inner_centre = sum(cross.opt_b[i + 1, centre] - cross.opt_b[i, centre] for i in INNER)
+    inner_edge = sum(cross.opt_b[i + 1, edge] - cross.opt_b[i, edge] for i in INNER)
+    assert inner_centre < 0.1 * inner_edge, (inner_centre, inner_edge)
+    # ONL is preserved / thicker at the centre (index 5)
+    onl_centre = cross.opt_b[6, centre] - cross.opt_b[5, centre]
+    onl_edge = cross.opt_b[6, edge] - cross.opt_b[5, edge]
+    assert onl_centre > onl_edge
+
+
+def test_photoreceptor_rpe_complex_stays_flat_under_the_pit():
+    # the RPE/choroid boundary (posterior anchor) must not move across the pit
+    # (flatten the global contour to isolate the foveal-thinning effect)
+    m = RetinaModel(location="macula", center_x_um=FOV / 2, vessels=[],
+                    curvature_radius_um=1e12)
+    x = np.linspace(0.0, FOV, 256)
+    cross = m.cross_section(0.0, x)
+    rpe_choroid = cross.opt_b[10]      # boundary below RPE
+    assert np.ptp(rpe_choroid) < 2.0, np.ptp(rpe_choroid)
+
+
+def test_macula_reconstructs_layered_structure():
+    img, depth, x, cross = _render(default_retina(center_x_um=FOV / 2))
+    # brightest band is the outer retina (EZ/RPE), deeper than the ILM
+    row_energy = img.mean(axis=1)
+    surface_row = int(np.argmax(cross.opt_b[0] < depth[-1]) )  # crude; just ensure structure
+    peak_row = int(np.argmax(row_energy))
+    assert peak_row * (depth[1] - depth[0]) > 300.0     # outer retina is deep
+    assert (row_energy > 0.2 * row_energy.max()).sum() > 20   # several bright bands
+
+
+def test_blood_vessel_casts_a_shadow():
+    from octsim.features import BloodVessel
+    src_depth = 200.0
+    vessel = BloodVessel(x0_um=FOV / 2, y0_um=0.0, depth_opt_um=src_depth + 25.0,
+                         caliber_um=90.0, shadow_od=1.4)
+    m = RetinaModel(location="macula", center_x_um=FOV * 0.15,  # fovea off to the side
+                    surface_opt_um=src_depth, vessels=[vessel])
+    img, depth, x, cross = _render(m, seed=1)
+    col_v = int(np.argmin(np.abs(x - FOV / 2)))
+    col_ref = int(np.argmin(np.abs(x - FOV * 0.85)))
+    below = depth > (src_depth + 60.0)
+    shadowed = img[below, col_v].mean()
+    normal = img[below, col_ref].mean()
+    assert shadowed < 0.75 * normal, (shadowed, normal)
+
+
+def test_onh_shows_central_excavation():
+    m = RetinaModel(location="onh", center_x_um=FOV / 2, vessels=[])
+    x = np.linspace(0.0, FOV, 256)
+    cross = m.cross_section(0.0, x)
+    centre = int(np.argmin(np.abs(x - FOV / 2)))
+    edge = 0
+    # the surface is excavated (deeper) at the disc centre
+    assert cross.opt_b[0, centre] > cross.opt_b[0, edge] + 100.0
+
+
+def test_random_retina_is_reproducible_and_varies():
+    a1, *_ = _render(random_retina(np.random.default_rng(7), lateral_fov_um=FOV), seed=3)
+    a2, *_ = _render(random_retina(np.random.default_rng(7), lateral_fov_um=FOV), seed=3)
+    a3, *_ = _render(random_retina(np.random.default_rng(8), lateral_fov_um=FOV), seed=3)
+    assert np.allclose(a1, a2)          # same rng seed -> identical anatomy
+    assert not np.allclose(a1, a3)      # different seed -> different anatomy
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for fn in fns:
+        fn()
+        print(f"ok  {fn.__name__}")
+    print(f"\n{len(fns)} Phase C checks passed")
