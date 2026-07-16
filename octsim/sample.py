@@ -164,14 +164,20 @@ def build_reflectivity_from_boundaries(
     for i in range(L):
         top_opt = opt_b[i][None, :]
         bot_opt = opt_b[i + 1][None, :]
-        mask = (d >= top_opt) & (d < bot_opt)
-        d_in_phys = np.clip(d - top_opt, 0.0, None) / layer_n[i]
-        atten = np.exp(-(cum_mu[None, :] + layer_mu_t[i] * d_in_phys))
+        # bound the attenuation exp to the depth rows this layer actually occupies —
+        # every masked value is identical, but the exp shrinks from full-frame to a band.
         if layer_backscatter[i] > 0:
-            bmap_i = layer_backscatter[i] * atten
-            if layer_directional is not None:   # per-column directional reflectance
-                bmap_i = bmap_i * layer_directional[i][None, :]
-            backscatter_map[mask] = bmap_i[mask]
+            r0 = max(0, int(np.floor(opt_b[i].min() / dz)))
+            r1 = min(n_depth, int(np.ceil(opt_b[i + 1].max() / dz)) + 1)
+            if r1 > r0:
+                ds = d[r0:r1]
+                msk = (ds >= top_opt) & (ds < bot_opt)
+                d_in_phys = np.clip(ds - top_opt, 0.0, None) / layer_n[i]
+                bmap_i = layer_backscatter[i] * np.exp(
+                    -(cum_mu[None, :] + layer_mu_t[i] * d_in_phys))
+                if layer_directional is not None:   # per-column directional reflectance
+                    bmap_i = bmap_i * layer_directional[i][None, :]
+                backscatter_map[r0:r1][msk] = bmap_i[msk]
 
         r_if = layer_interface[i]
         if r_if is None:
@@ -194,8 +200,10 @@ def build_reflectivity_from_boundaries(
 
     # slow intra-layer mottling under the fine speckle (fiber striping / gradients)
     if texture_contrast > 0:
+        tr0 = max(0, int(np.floor(opt_b[0].min() / dz)))
+        tr1 = min(n_depth, int(np.ceil(opt_b[-1].max() / dz)) + 1)
         gain = _smooth_gain(n_depth, n_x, rng, texture_contrast,
-                            max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0))
+                            max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0), band=(tr0, tr1))
         backscatter_map = backscatter_map * gain
 
     g = (rng.standard_normal((n_depth, n_x))
@@ -222,16 +230,26 @@ def _smooth1d(n: int, rng: np.random.Generator, sigma_px: float) -> np.ndarray:
 
 
 def _smooth_gain(nz: int, nx: int, rng: np.random.Generator, contrast: float,
-                 sigma_z: float, sigma_x: float) -> np.ndarray:
-    """Positive multiplicative low-frequency 2-D gain field ~ 1 ± contrast."""
+                 sigma_z: float, sigma_x: float,
+                 band: tuple[int, int] | None = None) -> np.ndarray:
+    """Positive multiplicative low-frequency 2-D gain field ~ 1 ± contrast.
+
+    The full-height noise is always drawn (keeping the RNG stream stable) but the
+    expensive Gaussian smoothing is confined to ``band`` rows ``[r0, r1)`` — the gain
+    is unity outside, where the backscatter map is empty anyway.
+    """
     f = rng.standard_normal((nz, nx))
+    r0, r1 = (0, nz) if band is None else band
+    sub = f[r0:r1]
     try:
         from scipy.ndimage import gaussian_filter
-        f = gaussian_filter(f, (sigma_z, sigma_x), mode="reflect")
+        sub = gaussian_filter(sub, (sigma_z, sigma_x), mode="reflect")
     except Exception:
         pass
-    f = (f - f.mean()) / (f.std() + 1e-9)
-    return 1.0 + contrast * np.clip(f, -2.5, 2.5)
+    sub = (sub - sub.mean()) / (sub.std() + 1e-9)
+    gain = np.ones((nz, nx))
+    gain[r0:r1] = 1.0 + contrast * np.clip(sub, -2.5, 2.5)
+    return gain
 
 
 def build_reflectivity(

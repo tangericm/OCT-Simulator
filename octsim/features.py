@@ -101,20 +101,25 @@ class ChoroidTexture:
         depth = ctx.depth_axis_um
         x = ctx.x_axis_um
         n_depth, n_x = r.shape
-        top = np.interp(np.arange(n_x), np.arange(n_x), self.top_opt)
-        band = (depth[:, None] >= top[None, :]) & (depth[:, None] < self.bot_opt[None, :])
+        band = ((depth[:, None] >= self.top_opt[None, :])
+                & (depth[:, None] < self.bot_opt[None, :]))
         if not np.any(band):
             return
         dz = ctx.dz
         dx = (x[1] - x[0]) if n_x > 1 else 1.0
-        # white noise smoothed to ~blob size -> low-frequency vascular field
+        # confine the (expensive) smoothing to the choroid band rows; the full-height
+        # noise is still drawn so the RNG stream — and everything downstream — is stable.
+        r0 = max(0, int(np.floor(self.top_opt.min() / dz)))
+        r1 = min(n_depth, int(np.ceil(self.bot_opt.max() / dz)) + 1)
         field = ctx.rng.standard_normal((n_depth, n_x))
+        sub = field[r0:r1]
         try:
             from scipy.ndimage import gaussian_filter
-            field = gaussian_filter(field, (max(self.blob_um / dz, 1.0),
-                                            max(self.blob_um / dx, 1.0)))
+            sub = gaussian_filter(sub, (max(self.blob_um / dz, 1.0),
+                                        max(self.blob_um / dx, 1.0)))
         except Exception:
             pass
-        field = (field - field.mean()) / (field.std() + 1e-9)
-        gain = 1.0 + self.contrast * np.clip(field, -1.5, 1.5)
+        sub = (sub - sub.mean()) / (sub.std() + 1e-9)
+        gain = np.ones((n_depth, n_x))
+        gain[r0:r1] = 1.0 + self.contrast * np.clip(sub, -1.5, 1.5)
         r[band] *= gain[band]

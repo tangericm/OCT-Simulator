@@ -48,13 +48,23 @@ fix batches. Update as items land.
 | 9 | speckle | heavier-tailed (K/gamma) statistics in sparse nuclear layers (INL/ONL) | med / low |
 | — | hybrid | optional SDEdit/CycleGAN refinement keeping the sim's exact labels | high / med |
 
-## Performance (11 findings)
+## Performance
 
-- multithread + complex64 the forward/reconstruct FFTs (largest single cost);
-- bound the per-layer attenuation `exp` to each layer's depth rows (~L× → ~1×);
-- draw only the needed samples for the vessel wall + bound ChoroidTexture to its band;
-- split averaging into a deterministic precompute + per-draw speckle tail;
-- cache k/P/carrier/Hann; vectorize `_rasterize_labels`; resolve once per dataset.
+Done (output-safe; reproducibility tests still exact):
+- ✅ multithread the forward/reconstruct FFTs via `octsim/_fft.py` (`scipy.fft` with
+  `workers=-1`, bit-identical to numpy pocketfft; numpy fallback). 0.125→0.034 s on 4
+  cores, scales with more.
+- ✅ bound the per-layer attenuation `exp` to each layer's occupied depth rows —
+  `build_reflectivity` 0.25→0.11 s, every masked value identical.
+- ✅ bound the ChoroidTexture + intra-layer-mottling Gaussian filters to their bands
+  (full-height noise still drawn, so the RNG stream is stable) — ndimage 0.59→0.20 s.
+- ✅ vessel wall draws only the ring samples (earlier batch).
+
+Net: macula 2048×512 ~430→260 ms/B-scan on a 4-core box; larger machines gain more
+from the FFT threading. Remaining (lower value; default `averages=1` is raw):
+- split averaging into a deterministic base (bounded exps + interfaces) + per-draw
+  speckle/texture tail — saves the exps ×(navg−1) on averaged clean-target runs;
+- cache k/P/carrier/Hann across a volume's frames; vectorize `_rasterize_labels`.
 
 ## Validation (how we'll know it improved)
 

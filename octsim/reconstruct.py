@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _fft
 from .source import LightSource
 
 
@@ -67,7 +68,7 @@ def reconstruct_bscan(
         from .dispersion import dispersion_phase
         ph = dispersion_phase(source.k_grid(), source.k0, dispersion_coeffs)
         sc = sc * ph[:, None]
-    full = np.fft.ifft(sc, axis=0)
+    full = _fft.ifft(sc, axis=0)
     n_depth = s.shape[0] // 2
     return full[:n_depth, :]
 
