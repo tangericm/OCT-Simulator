@@ -102,6 +102,92 @@ class Sample:
         return opt
 
 
+@dataclass
+class SceneContext:
+    """Grids and geometry passed to :class:`~octsim.features.Feature` objects."""
+
+    depth_axis_um: np.ndarray     # [n_depth]
+    x_axis_um: np.ndarray         # [n_x]
+    y_um: float                   # slow-axis position of this frame
+    opt_b: np.ndarray             # [L+1, n_x] optical boundary depths
+    dz: float                     # depth pixel (µm)
+    rng: np.random.Generator
+
+    def depth_bin(self, opt_depth_um) -> np.ndarray:
+        return np.clip(np.round(np.asarray(opt_depth_um) / self.dz).astype(np.intp),
+                       0, self.depth_axis_um.size - 1)
+
+
+def build_reflectivity_from_boundaries(
+    opt_b: np.ndarray,
+    phys_b: np.ndarray,
+    *,
+    layer_n: np.ndarray,
+    layer_backscatter: np.ndarray,
+    layer_mu_t: np.ndarray,
+    layer_interface: list,
+    top_n: float,
+    depth_axis_um: np.ndarray,
+    x_axis_um: np.ndarray,
+    beam_waist_um: float,
+    lateral_extent_um: float,
+    rng: np.random.Generator,
+    features=None,
+    y_um: float = 0.0,
+) -> np.ndarray:
+    """Core reflectivity builder from per-column layer boundaries.
+
+    ``opt_b`` / ``phys_b`` are ``[L+1, n_x]`` optical / physical boundary depths (so
+    layers may vary in thickness with lateral position — foveal pit, cup, curvature).
+    Speckle is a **single** circular-complex-Gaussian draw for the whole frame scaled
+    by a per-cell backscatter×attenuation map; attenuation accumulates **per column**
+    (so shadows and thinned layers attenuate correctly); optional ``features`` then
+    edit the field (vessels + shadows) before the lateral beam convolution.
+    """
+    depth_axis_um = np.asarray(depth_axis_um, float)
+    x_axis_um = np.asarray(x_axis_um, float)
+    n_depth = depth_axis_um.size
+    n_x = x_axis_um.size
+    dz = float(depth_axis_um[1] - depth_axis_um[0]) if n_depth > 1 else 1.0
+    d = depth_axis_um[:, None]
+    cols = np.arange(n_x)
+
+    r = np.zeros((n_depth, n_x), dtype=np.complex128)
+    backscatter_map = np.zeros((n_depth, n_x))
+    cum_mu = np.zeros(n_x)                                  # per-column attenuation above layer i
+    L = len(layer_n)
+    for i in range(L):
+        top_opt = opt_b[i][None, :]
+        bot_opt = opt_b[i + 1][None, :]
+        mask = (d >= top_opt) & (d < bot_opt)
+        d_in_phys = np.clip(d - top_opt, 0.0, None) / layer_n[i]
+        atten = np.exp(-(cum_mu[None, :] + layer_mu_t[i] * d_in_phys))
+        if layer_backscatter[i] > 0:
+            backscatter_map[mask] = (layer_backscatter[i] * atten)[mask]
+
+        r_if = layer_interface[i]
+        if r_if is None:
+            n_above = top_n if i == 0 else layer_n[i - 1]
+            r_if = (n_above - layer_n[i]) / (n_above + layer_n[i])
+        if abs(r_if) > 1e-6:
+            bins = np.clip(np.round(opt_b[i] / dz).astype(np.intp), 0, n_depth - 1)
+            r[bins, cols] += r_if * np.exp(-cum_mu)
+
+        cum_mu += layer_mu_t[i] * (phys_b[i + 1] - phys_b[i])
+
+    g = (rng.standard_normal((n_depth, n_x))
+         + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+    r += g * backscatter_map
+
+    if features:
+        ctx = SceneContext(depth_axis_um, x_axis_um, y_um, opt_b, dz, rng)
+        for feat in features:
+            feat.apply(r, ctx)
+
+    dx_um = lateral_extent_um / (n_x - 1) if n_x > 1 else 1.0
+    return _lateral_beam_filter(r, beam_waist_um / dx_um)
+
+
 def build_reflectivity(
     sample: Sample,
     depth_axis_um: np.ndarray,
@@ -111,52 +197,24 @@ def build_reflectivity(
     lateral_extent_um: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Complex reflectivity field ``r[n_depth, n_x]`` on the reconstruction grid.
+    """Reflectivity field for a flat :class:`Sample` (back-compat wrapper).
 
-    Volume speckle is drawn as a circular complex-Gaussian per cell (scaled by
-    layer backscatter and attenuation); specular interfaces are added as
-    deterministic bright lines; the whole field is then convolved laterally by
-    the beam amplitude profile, which sets both the lateral resolution and the
-    lateral speckle grain.
+    Computes per-column boundaries and layer property arrays from the ``Sample`` and
+    delegates to :func:`build_reflectivity_from_boundaries`.
     """
-    depth_axis_um = np.asarray(depth_axis_um, float)
     x_axis_um = np.asarray(x_axis_um, float)
-    n_depth = depth_axis_um.size
-    n_x = x_axis_um.size
-    dz = float(depth_axis_um[1] - depth_axis_um[0]) if n_depth > 1 else 1.0
-
-    d = depth_axis_um[:, None]                              # [n_depth, 1]
-    opt_b = sample.optical_boundary_depths_um(x_axis_um)    # [L+1, n_x]
-    r = np.zeros((n_depth, n_x), dtype=np.complex128)
-
-    cum_mu = 0.0                                            # amplitude attenuation above this layer
-    cols = np.arange(n_x)
-    for i, layer in enumerate(sample.layers):
-        top_opt = opt_b[i][None, :]
-        bot_opt = opt_b[i + 1][None, :]
-        mask = (d >= top_opt) & (d < bot_opt)
-
-        # one-way amplitude attenuation to each cell (physical path)
-        d_in_layer_phys = np.clip(d - top_opt, 0.0, None) / layer.n
-        atten = np.exp(-(cum_mu + layer.mu_t_per_um * d_in_layer_phys))
-
-        if layer.backscatter > 0 and layer.density_per_um2 > 0:
-            g = (rng.standard_normal((n_depth, n_x))
-                 + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
-            r += np.where(mask, g * (layer.backscatter * atten), 0.0)
-
-        r_if = layer.interface_reflectivity
-        if r_if is None:
-            n_above = sample.top_n if i == 0 else sample.layers[i - 1].n
-            r_if = (n_above - layer.n) / (n_above + layer.n)
-        if abs(r_if) > 1e-6:
-            bins = np.clip(np.round(opt_b[i] / dz).astype(np.intp), 0, n_depth - 1)
-            r[bins, cols] += r_if * np.exp(-cum_mu)
-
-        cum_mu += layer.mu_t_per_um * layer.thickness_um
-
-    dx_um = lateral_extent_um / (n_x - 1) if n_x > 1 else 1.0
-    return _lateral_beam_filter(r, beam_waist_um / dx_um)
+    opt_b = sample.optical_boundary_depths_um(x_axis_um)
+    phys_b = sample.boundary_depths_um(x_axis_um)
+    layers = sample.layers
+    return build_reflectivity_from_boundaries(
+        opt_b, phys_b,
+        layer_n=np.array([ly.n for ly in layers]),
+        layer_backscatter=np.array([ly.backscatter if ly.density_per_um2 > 0 else 0.0
+                                    for ly in layers]),
+        layer_mu_t=np.array([ly.mu_t_per_um for ly in layers]),
+        layer_interface=[ly.interface_reflectivity for ly in layers],
+        top_n=sample.top_n, depth_axis_um=depth_axis_um, x_axis_um=x_axis_um,
+        beam_waist_um=beam_waist_um, lateral_extent_um=lateral_extent_um, rng=rng)
 
 
 def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:

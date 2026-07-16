@@ -66,6 +66,8 @@ class ResolvedConfig:
     microsaccade: bool
     anatomy: str
     scan_pattern: str
+    sample_depth_um: float
+    sample_lateral_offset_um: float
     derived: dict[str, float]
 
 
@@ -120,6 +122,8 @@ class SimConfig:
     # --- scene ---
     anatomy: str = "macula"
     location: str = "macula"                # kept in sync with anatomy for retinal scenes
+    sample_depth_um: float = 200.0          # optical depth of the anterior surface (sample position)
+    sample_lateral_offset_um: float = 0.0   # lateral shift of the anatomy centre within the FOV
     reference_amp: float = 4.0
 
     # --- batch ---
@@ -148,8 +152,10 @@ class SimConfig:
 
         for name in ("bandwidth_fwhm_nm", "axial_resolution_um", "axial_range_um",
                      "axial_sampling_um", "lateral_resolution_um", "falloff_6db_um",
-                     "target_snr_db", "motion_level", "axial_motion_um", "phase_drift_rad"):
+                     "target_snr_db", "motion_level", "axial_motion_um", "phase_drift_rad",
+                     "sample_depth_um"):
             setattr(self, name, max(0.0, float(getattr(self, name))))
+        self.sample_lateral_offset_um = float(self.sample_lateral_offset_um)  # signed
 
         self.dispersion = float(self.dispersion)   # signed tuning knob
         self.noise_free = bool(self.noise_free)
@@ -257,7 +263,8 @@ class SimConfig:
             noise=noise, motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
             phase_drift_rad=self.phase_drift_rad, cardiac=self.cardiac,
             microsaccade=self.microsaccade, anatomy=self.anatomy,
-            scan_pattern=self.scan_pattern, derived=derived)
+            scan_pattern=self.scan_pattern, sample_depth_um=self.sample_depth_um,
+            sample_lateral_offset_um=self.sample_lateral_offset_um, derived=derived)
 
     def _resolve_noise(self) -> NoiseModel:
         if self.noise_free or self.noise_level <= 0:
