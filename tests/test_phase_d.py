@@ -96,6 +96,39 @@ def test_faster_acquisition_lowers_snr():
     assert fast < slow, (fast, slow)
 
 
+def test_every_anatomy_simulates():
+    """All scene types render a well-formed B-scan (labels, dB range, retained spectra)."""
+    for anatomy in ("macula", "onh", "periphery", "mirror", "paper", "cornea"):
+        res = simulate(_cfg(anatomy=anatomy, scan_pattern="bscan"), seed=1)
+        n_depth = res.resolved.source.n_k // 2
+        assert res.bscan.shape == (n_depth, 96), anatomy
+        assert res.bscan_db.max() <= 0.0 + 1e-6, anatomy
+        assert res.spectra is not None and res.spectra.shape[1] == 96, anatomy
+        assert np.isfinite(res.bscan).all(), anatomy
+
+
+def test_sample_depth_positions_paper_and_mirror():
+    """The adjustable sample position places the surface near sample_depth_um."""
+    from octsim.reconstruct import reconstruct_bscan
+    for anatomy in ("mirror", "paper"):
+        for depth in (250.0, 500.0):
+            res = simulate(_cfg(anatomy=anatomy, sample_depth_um=depth, noise_free=True), seed=0)
+            aline = np.abs(reconstruct_bscan(res.spectra[:, 0])).ravel()
+            surf_um = int(np.argmax(aline)) * res.resolved.source.depth_pixel_um
+            assert abs(surf_um - depth) < 60.0, (anatomy, depth, surf_um)
+
+
+def test_config_serialization_round_trips():
+    from octsim.config import config_from_mapping
+    cfg = SimConfig(anatomy="onh", scan_pattern="volume", n_frames=6, dispersion=1.5,
+                    bandwidth_fwhm_nm=80.0, line_rate_hz=200_000.0, noise_level=0.5)
+    back = config_from_mapping(cfg.to_dict())
+    assert back.to_dict() == cfg.normalized().to_dict()
+    # a resolvable field left at 0 stays derivable after the round-trip
+    assert config_from_mapping({"axial_resolution_um": 5.0, "bandwidth_fwhm_nm": 0.0}
+                               ).resolve().derived["bandwidth_fwhm_nm"] > 0
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

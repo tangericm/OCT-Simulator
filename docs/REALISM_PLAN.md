@@ -29,9 +29,12 @@ fix batches. Update as items land.
   intensity ∝ μs. **Fix:** `backscatter_ref*np.sqrt(s)`.
 - **read noise scales with LO/reference power** → inverts read-limited SNR vs source power.
 - **`_seed_key` identical for every sample** in a dataset (spawn index dropped).
-- **vessel shadow starts at the lumen center**, not the posterior wall; OD unrelated to caliber.
-- beam PSF uses the **intensity** profile on the complex field (should be amplitude → √2 in
-  effective lateral resolution). (User-flagged; otherwise the fixed-spot model is correct.)
+- **vessel shadow starts at the lumen center**, not the posterior wall; OD unrelated to caliber. ✅
+- ✅ beam PSF used the **intensity** profile `exp(-2t²/w²)` on the complex field, imaging points
+  √2 too sharp vs the reported lateral resolution. Now the **amplitude** profile `exp(-t²/w²)`,
+  so a point images at intensity FWHM = `waist_to_lateral_fwhm_um(w)` (pinned by a test). The
+  fixed-physical-spot sampling itself was already correct (waist in px = waist_um/dx).
+- ✅ dead `compensation_phase` removed; `sample_depth_um` now positions paper + cornea too.
 
 ## Realism strategy (prioritized)
 

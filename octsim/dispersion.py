@@ -45,8 +45,3 @@ def apply_dispersion(e_s: np.ndarray, k: np.ndarray, k0: float,
     if e_s.ndim == 2:
         ph = ph[:, None]
     return e_s * ph
-
-
-def compensation_phase(k: np.ndarray, k0: float, coeffs: Sequence[float] | None) -> np.ndarray:
-    """Conjugate phase ``exp(-i·phi(k))`` for numerical dispersion compensation."""
-    return np.conj(dispersion_phase(k, k0, coeffs))
