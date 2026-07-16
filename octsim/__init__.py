@@ -34,6 +34,8 @@ from .calibration import (
     retina_from_shape_model,
 )
 from .config import ResolvedConfig, SimConfig, config_from_mapping
+from .data import unlabeled
+from .data.unlabeled import TextureProfile, bundled_texture, extract_texture
 from .shape_model import LayerShapeModel
 from .forward import synthesize_ascan_spectrum, synthesize_bscan_spectra
 from .generate import SampleResult, generate_dataset, simulate
@@ -74,6 +76,11 @@ __all__ = [
     "retina_from_profile",
     "retina_from_shape_model",
     "LayerShapeModel",
+    # unlabeled texture learning
+    "unlabeled",
+    "TextureProfile",
+    "extract_texture",
+    "bundled_texture",
 ]
 
 __version__ = "0.2.0"
