@@ -26,8 +26,15 @@ Low-level API (build a scene by hand)::
 from __future__ import annotations
 
 from . import calibration, presets
-from .calibration import CalibrationProfile, extract_profile, literature_profile, retina_from_profile
+from .calibration import (
+    CalibrationProfile,
+    extract_profile,
+    literature_profile,
+    retina_from_profile,
+    retina_from_shape_model,
+)
 from .config import ResolvedConfig, SimConfig, config_from_mapping
+from .shape_model import LayerShapeModel
 from .forward import synthesize_ascan_spectrum, synthesize_bscan_spectra
 from .generate import SampleResult, generate_dataset, simulate
 from .noise import NoiseModel
@@ -65,6 +72,8 @@ __all__ = [
     "literature_profile",
     "extract_profile",
     "retina_from_profile",
+    "retina_from_shape_model",
+    "LayerShapeModel",
 ]
 
 __version__ = "0.2.0"

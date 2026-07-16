@@ -13,3 +13,11 @@ output/
 *.tif
 *.tiff
 *.npy
+
+# Raw OCT datasets (large; NOT redistributed — fit a shape model, commit the .npz)
+*.mat
+*.zip
+2015_BOE_Chiu*/
+duke*/
+# ...but DO track the small fitted shape-model artifacts
+!octsim/data/*.npz

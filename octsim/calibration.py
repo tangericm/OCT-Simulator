@@ -342,6 +342,87 @@ def average_profiles(profiles: list) -> CalibrationProfile:
 
 
 # --------------------------------------------------------------------------- apply
+#: how each of the 11 model layers draws from the 7 Duke layers (name, duke_layer, split).
+#: fractions are computed from the canonical table so a Duke layer splits by literature ratio.
+def _duke_split_map():
+    from .anatomy.retina import RETINA_LAYERS
+    t = {ly.name: ly.thickness_um for ly in RETINA_LAYERS}
+    gcl = t["GCL"] / (t["GCL"] + t["IPL"])
+    elm = t["ELM"] / (t["ELM"] + t["EZ"])
+    iz = t["IZ"] / (t["IZ"] + t["RPE"])
+    return [
+        ("NFL", "RNFL", 1.0), ("GCL", "GCLIPL", gcl), ("IPL", "GCLIPL", 1 - gcl),
+        ("INL", "INL", 1.0), ("OPL", "OPL", 1.0), ("ONL", "ONL", 1.0),
+        ("ELM", "IS", elm), ("EZ", "IS", 1 - elm), ("IZ", "OSRPE", iz),
+        ("RPE", "OSRPE", 1 - iz), ("choroid", None, None),
+    ]
+
+
+def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "CalibrationProfile | None" = None,
+                            location: str = "macula", lateral_fov_um: float = 6000.0,
+                            surface_opt_um: float = 200.0, lateral_offset_um: float = 0.0,
+                            sample_scale: float = 1.0):
+    """Sample a :class:`~octsim.anatomy.retina.RetinaModel` whose GEOMETRY is drawn from a
+    :class:`~octsim.shape_model.LayerShapeModel` (real fovea/pit/thickness morphology) and
+    whose OPTICS come from ``optics`` (a measured/literature profile). The exact labels are
+    unaffected — the sampled thickness field just drives the physics forward model.
+    """
+    from .anatomy.retina import RETINA_LAYERS, RetinaModel, BoundaryUndulation
+    from .features import BloodVessel
+
+    optics = optics or literature_profile()
+    opt_by_name = {ly.name: ly for ly in optics.layers}
+    sampled = shape.sample(rng, scale=sample_scale)          # [7, n_ecc] µm
+    duke_idx = {nm: i for i, nm in enumerate(shape.layer_names)}
+    smap = _duke_split_map()
+
+    n_ecc = shape.ecc_grid_um.size
+    data_thick = np.zeros((len(RETINA_LAYERS), n_ecc))
+    layers = []
+    for i, (my_name, duke_name, frac) in enumerate(smap):
+        canon = next(ly for ly in RETINA_LAYERS if ly.name == my_name)
+        oc = opt_by_name.get(my_name)
+        if duke_name is None:                                # choroid: parametric, constant
+            thick_um = (oc.thickness_um if oc else canon.thickness_um) * float(rng.uniform(0.9, 1.1))
+            data_thick[i] = thick_um
+        else:
+            data_thick[i] = np.clip(sampled[duke_idx[duke_name]] * frac, 0.1, None)
+            thick_um = float(np.mean(data_thick[i]))         # scalar reference for the anchor
+        layers.append(replace(
+            canon, thickness_um=thick_um,
+            backscatter=(oc.reflectivity * optics.backscatter_gain if oc else canon.backscatter),
+            mu_s_per_mm=(oc.attenuation_per_um * 1e3 if oc else canon.mu_s_per_mm),
+            interface_reflectivity=(oc.specular if (oc and oc.specular > 0)
+                                    else canon.interface_reflectivity)))
+
+    center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-60, 60))
+    vessels = []
+    for _ in range(int(rng.integers(2, 6))):
+        vx = float(rng.uniform(0.1, 0.9)) * lateral_fov_um
+        if location == "macula" and abs(vx - center_x) < 250.0:
+            vx += 300.0 * np.sign(vx - center_x + 1e-9)
+        c = float(rng.uniform(30.0, 120.0))
+        vessels.append(BloodVessel(
+            x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=c,
+            plexus_offset_um=(0.0 if c > 80 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))),
+            slope=float(rng.uniform(-0.4, 0.4)), shadow_od=float(rng.uniform(0.7, 1.5))))
+
+    undU = BoundaryUndulation.make(len(RETINA_LAYERS) + 2, rng,
+                                   amp_um=float(np.clip(shape.undulation_rms_um * 1.1, 2.0, 9.0)),
+                                   corr_um=float(rng.uniform(350.0, 600.0)))
+    return RetinaModel(
+        location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
+        center_y_um=float(rng.uniform(-100, 100)), undulation=undU,
+        curvature_radius_um=optics.curvature_radius_um, curvature_sag_um=optics.curvature_sag_max_um,
+        curvature_concave=optics.curvature_concave, boundary_sharpness_um=optics.boundary_sharpness_um,
+        choroid_contrast=optics.choroid_contrast, tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
+        texture_contrast=float(rng.uniform(0.16, 0.30)), interface_jitter=float(rng.uniform(0.20, 0.40)),
+        vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
+        directional_strength=float(rng.uniform(0.45, 0.75)),
+        henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
+        data_thickness=data_thick, data_ecc_um=shape.ecc_grid_um, vessels=vessels)
+
+
 def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *,
                         location: str = "macula", lateral_fov_um: float = 6000.0,
                         surface_opt_um: float = 200.0, lateral_offset_um: float = 0.0):

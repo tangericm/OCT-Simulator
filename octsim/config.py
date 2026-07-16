@@ -126,6 +126,8 @@ class SimConfig:
     location: str = "macula"                # kept in sync with anatomy for retinal scenes
     sample_depth_um: float = 200.0          # optical depth of the anterior surface (sample position)
     sample_lateral_offset_um: float = 0.0   # lateral shift of the anatomy centre within the FOV
+    #: data-driven geometry: ""=parametric pit; "duke"=bundled shape model; or a .npz path.
+    shape_model: str = ""
     reference_amp: float = 4.0
 
     # --- batch ---
@@ -159,6 +161,7 @@ class SimConfig:
                      "sample_depth_um"):
             setattr(self, name, max(0.0, float(getattr(self, name))))
         self.sample_lateral_offset_um = float(self.sample_lateral_offset_um)  # signed
+        self.shape_model = str(self.shape_model or "")
 
         self.dispersion = float(self.dispersion)   # signed tuning knob
         self.noise_free = bool(self.noise_free)

@@ -13,6 +13,8 @@ volume's frames share correlated bulk motion, phase drift, and washout.
 
 from __future__ import annotations
 
+import functools
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -82,6 +84,12 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     a = config.anatomy
     fov = config.lateral_fov_um
     if a in RETINAL:
+        if config.shape_model:      # data-driven geometry from a learned shape model
+            from . import calibration
+            sm = _resolve_shape_model(config.shape_model)
+            return calibration.retina_from_shape_model(
+                sm, rng, location=a, lateral_fov_um=fov, surface_opt_um=config.sample_depth_um,
+                lateral_offset_um=config.sample_lateral_offset_um)
         if config.randomize:
             return random_retina(rng, location=a, surface_opt_um=config.sample_depth_um,
                                  lateral_fov_um=fov,
@@ -96,6 +104,15 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     if a == "cornea":
         return presets.cornea(surface_um=config.sample_depth_um)
     raise ValueError(f"unknown anatomy {a!r}")
+
+
+@functools.lru_cache(maxsize=8)
+def _resolve_shape_model(name: str):
+    """Load a LayerShapeModel by path, or the bundled Duke model for 'duke'/'default'."""
+    from .shape_model import LayerShapeModel
+    if name in ("duke", "default", "bundled"):
+        name = os.path.join(os.path.dirname(__file__), "data", "retina_shape_duke.npz")
+    return LayerShapeModel.load(name)
 
 
 def _scene_params(scene) -> dict:

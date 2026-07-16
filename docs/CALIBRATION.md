@@ -64,9 +64,45 @@ Optics (reflectivity, attenuation), curvature, and boundary sharpness come strai
 data; thicknesses and the foveal pit are drawn around the profile's means for per-eye
 variation. Labels are unaffected — the simulator still emits exact layer maps.
 
+## Statistical shape model (geometry from data)
+
+Beyond per-layer optics, the *geometry* (layer-thickness profiles, foveal-pit morphology,
+boundary roughness) is learned from real segmentations by a PCA
+`octsim.shape_model.LayerShapeModel` and sampled per eye. The repo ships a model fitted on
+the **Duke SD-OCT DME dataset** (Chiu et al., BOE 2015 — 85 near-normal scans after an edema
+filter): `octsim/data/retina_shape_duke.npz` (~80 KB). Raw data is never committed; refit with:
+
+```bash
+# download 2015_BOE_Chiu2.zip from people.duke.edu/~sf59/Chiu_BOE_2014_dataset.htm, unzip, then
+python scripts/fit_shape_model.py --root path/to/2015_BOE_Chiu --out octsim/data/retina_shape_duke.npz
+```
+
+Use it — geometry from data, optics from a profile, exact labels preserved:
+
+```python
+import numpy as np
+from octsim import LayerShapeModel, retina_from_shape_model, literature_profile
+sm = LayerShapeModel.load("octsim/data/retina_shape_duke.npz")
+m = retina_from_shape_model(sm, np.random.default_rng(0), optics=literature_profile(),
+                            location="macula", lateral_fov_um=6000.0)
+```
+
+Or straight from the config / GUI (`shape_model="duke"` uses the bundled model; a path loads
+your own):
+
+```python
+from octsim import SimConfig, simulate
+res = simulate(SimConfig(anatomy="macula", shape_model="duke", lateral_fov_um=6000.0), seed=3)
+```
+
+The 8 Duke surfaces bound 7 layers (`RNFL, GCL+IPL, INL, OPL, ONL, IS, OS+RPE`); they are
+split onto the simulator's 11 layers by the canonical thickness ratios, and the choroid stays
+parametric. **Caveat:** Duke DME are diabetic eyes — the shipped model skews slightly thick
+even after filtering; refit on normal / Maestro segmentations for a normal-eye prior.
+
 ## Roadmap
 
-- **Now:** per-layer optics + curvature + boundary sharpness from data; literature bootstrap.
-- **Next:** a PCA/statistical-shape model over segmented boundaries so the *geometry* (thickness
-  profiles, pit morphology, undulation spectrum) is sampled from the data distribution rather
-  than parametric priors — the natural extension of `average_profiles`.
+- **Done:** per-layer optics + curvature + boundary sharpness from data; a PCA shape model that
+  samples real foveal-pit / thickness geometry; both wired into the config/GUI.
+- **Next:** a normal-eye shape model (refit on non-DME data); include the global curvature and
+  ONL foveal bulge as learned modes; extract linear-domain optics from Maestro `.raw` recons.
