@@ -26,6 +26,8 @@ def reconstruct_bscan(
     window: bool = True,
     dc_highpass_frac: float = 1.0 / 16.0,
     background: np.ndarray | None = None,
+    source=None,
+    dispersion_coeffs=None,
 ) -> np.ndarray:
     """Reconstruct a complex B-scan from raw spectra ``[n_k, n_x]``.
 
@@ -38,6 +40,11 @@ def reconstruct_bscan(
       moving-average envelope of width ``dc_highpass_frac · n_k``. This removes
       the slowly-varying source/autocorrelation background while preserving the
       interferometric fringes, and is self-contained (works on a lone A-scan).
+
+    Numerical **dispersion compensation** is applied when both ``source`` and
+    ``dispersion_coeffs`` are given: the DC-removed spectrum is multiplied by
+    ``exp(-i·phi(k))`` (the conjugate of the forward dispersion phase) before the
+    IFFT, sharpening the positive-depth peaks.
 
     Returns the positive-depth complex A-lines ``[n_k//2, n_x]``. Take ``np.abs``
     for magnitude or :func:`to_db` for a display image.
@@ -52,7 +59,15 @@ def reconstruct_bscan(
         s = s - _moving_average(s, width)
     if window:
         s = s * np.hanning(s.shape[0])[:, None]
-    full = np.fft.ifft(s, axis=0)
+    sc = s.astype(np.complex128, copy=False)
+    if source is not None and dispersion_coeffs:
+        # The positive-depth half (full[:n_depth]) selects the exp(-i·2kz) fringe
+        # component, which carries -phi under the forward's exp(+i·phi); compensating
+        # it therefore multiplies by exp(+i·phi) = the forward dispersion phase.
+        from .dispersion import dispersion_phase
+        ph = dispersion_phase(source.k_grid(), source.k0, dispersion_coeffs)
+        sc = sc * ph[:, None]
+    full = np.fft.ifft(sc, axis=0)
     n_depth = s.shape[0] // 2
     return full[:n_depth, :]
 
