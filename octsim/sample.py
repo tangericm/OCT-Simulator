@@ -134,6 +134,9 @@ def build_reflectivity_from_boundaries(
     rng: np.random.Generator,
     features=None,
     y_um: float = 0.0,
+    texture_contrast: float = 0.0,
+    interface_jitter: float = 0.0,
+    vitreous_backscatter: float = 0.0,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -149,6 +152,7 @@ def build_reflectivity_from_boundaries(
     n_depth = depth_axis_um.size
     n_x = x_axis_um.size
     dz = float(depth_axis_um[1] - depth_axis_um[0]) if n_depth > 1 else 1.0
+    dx_um = lateral_extent_um / (n_x - 1) if n_x > 1 else 1.0
     d = depth_axis_um[:, None]
     cols = np.arange(n_x)
 
@@ -171,9 +175,24 @@ def build_reflectivity_from_boundaries(
             r_if = (n_above - layer_n[i]) / (n_above + layer_n[i])
         if abs(r_if) > 1e-6:
             bins = np.clip(np.round(opt_b[i] / dz).astype(np.intp), 0, n_depth - 1)
-            r[bins, cols] += r_if * np.exp(-cum_mu)
+            amp = r_if * np.exp(-cum_mu)
+            if interface_jitter > 0:  # break the too-perfect lateral coherence
+                amp = amp * (1.0 + interface_jitter * _smooth1d(n_x, rng, 90.0 / dx_um))
+                amp = amp * np.exp(1j * (0.4 * interface_jitter) * _smooth1d(n_x, rng, 60.0 / dx_um))
+            r[bins, cols] += amp
 
         cum_mu += layer_mu_t[i] * (phys_b[i + 1] - phys_b[i])
+
+    # faint vitreous backscatter above the ILM (nearly transparent, not pure black)
+    if vitreous_backscatter > 0:
+        above = d < opt_b[0][None, :]
+        backscatter_map = np.where(above, vitreous_backscatter, backscatter_map)
+
+    # slow intra-layer mottling under the fine speckle (fiber striping / gradients)
+    if texture_contrast > 0:
+        gain = _smooth_gain(n_depth, n_x, rng, texture_contrast,
+                            max(18.0 / dz, 1.0), max(70.0 / dx_um, 1.0))
+        backscatter_map = backscatter_map * gain
 
     g = (rng.standard_normal((n_depth, n_x))
          + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
@@ -184,8 +203,31 @@ def build_reflectivity_from_boundaries(
         for feat in features:
             feat.apply(r, ctx)
 
-    dx_um = lateral_extent_um / (n_x - 1) if n_x > 1 else 1.0
     return _lateral_beam_filter(r, beam_waist_um / dx_um)
+
+
+def _smooth1d(n: int, rng: np.random.Generator, sigma_px: float) -> np.ndarray:
+    """Zero-mean unit-std smooth 1-D field (low-frequency lateral modulation)."""
+    v = rng.standard_normal(n)
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        v = gaussian_filter1d(v, max(sigma_px, 1.0), mode="reflect")
+    except Exception:
+        pass
+    return (v - v.mean()) / (v.std() + 1e-9)
+
+
+def _smooth_gain(nz: int, nx: int, rng: np.random.Generator, contrast: float,
+                 sigma_z: float, sigma_x: float) -> np.ndarray:
+    """Positive multiplicative low-frequency 2-D gain field ~ 1 ± contrast."""
+    f = rng.standard_normal((nz, nx))
+    try:
+        from scipy.ndimage import gaussian_filter
+        f = gaussian_filter(f, (sigma_z, sigma_x), mode="reflect")
+    except Exception:
+        pass
+    f = (f - f.mean()) / (f.std() + 1e-9)
+    return 1.0 + contrast * np.clip(f, -2.5, 2.5)
 
 
 def build_reflectivity(

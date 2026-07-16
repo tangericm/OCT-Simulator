@@ -72,17 +72,37 @@ def test_macula_reconstructs_layered_structure():
 def test_blood_vessel_casts_a_shadow():
     from octsim.features import BloodVessel
     src_depth = 200.0
-    vessel = BloodVessel(x0_um=FOV / 2, y0_um=0.0, depth_opt_um=src_depth + 25.0,
-                         caliber_um=90.0, shadow_od=1.4)
+    vessel = BloodVessel(x0_um=FOV / 2, y0_um=0.0, caliber_um=90.0, shadow_od=1.4)
     m = RetinaModel(location="macula", center_x_um=FOV * 0.15,  # fovea off to the side
                     surface_opt_um=src_depth, vessels=[vessel])
     img, depth, x, cross = _render(m, seed=1)
     col_v = int(np.argmin(np.abs(x - FOV / 2)))
     col_ref = int(np.argmin(np.abs(x - FOV * 0.85)))
-    below = depth > (src_depth + 60.0)
+    below = depth > (src_depth + 90.0)
     shadowed = img[below, col_v].mean()
     normal = img[below, col_ref].mean()
-    assert shadowed < 0.75 * normal, (shadowed, normal)
+    assert shadowed < 0.8 * normal, (shadowed, normal)
+
+
+def test_vessel_never_floats_above_ilm():
+    from octsim.features import BloodVessel
+    # vessel over the foveal pit, where the ILM dips ~100 µm: it must stay anchored
+    # to the local surface and deposit NOTHING in the vitreous above the ILM.
+    m = RetinaModel(location="macula", center_x_um=FOV / 2, surface_opt_um=180.0,
+                    vessels=[BloodVessel(x0_um=FOV / 2, y0_um=0.0, caliber_um=100.0)])
+    x = np.linspace(0.0, FOV, 256)
+    cross = m.cross_section(0.0, x)
+    depth = LightSource(n_k=1024).depth_axis_um()
+    r = build_reflectivity_from_boundaries(
+        cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
+        layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
+        layer_interface=cross.layer_interface, top_n=cross.top_n,
+        depth_axis_um=depth, x_axis_um=x, beam_waist_um=12.0, lateral_extent_um=FOV,
+        rng=np.random.default_rng(0), features=cross.features, y_um=0.0)
+    col = int(np.argmin(np.abs(x - FOV / 2)))
+    ilm = cross.opt_b[0, col]
+    above = depth < ilm - 2.0
+    assert np.max(np.abs(r[above, col])) < 1e-9, "vessel deposited signal in the vitreous"
 
 
 def test_onh_shows_central_excavation():

@@ -25,7 +25,7 @@ real macular scans.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -88,6 +88,10 @@ class CrossSection:
     top_n: float
     features: list
     label_names: list
+    # realism knobs consumed by the reflectivity builder (0 = off / MATLAB-plain)
+    texture_contrast: float = 0.0        # slow intra-layer mottling depth
+    interface_jitter: float = 0.0        # lateral break-up of specular interfaces
+    vitreous_backscatter: float = 0.0    # faint fill above the ILM (not pure black)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -99,6 +103,44 @@ def _smootherstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
     """Perlin smootherstep (zero 1st and 2nd derivatives at the edges) — gentler."""
     t = np.clip((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+@dataclass
+class BoundaryUndulation:
+    """Low-frequency spatially-correlated waviness added to every layer boundary.
+
+    Real layer boundaries are gently undulating (few-µm RMS, sub-mm wavelength), not
+    exact vertical offsets of one curve. Each boundary gets a SHARED low-frequency
+    component (so neighbours co-undulate) plus its OWN independent component (so gaps
+    still vary) — the statistical-shape behaviour that removes the mechanically-rigid,
+    perfectly-parallel look.
+    """
+
+    amp_um: float
+    shared: np.ndarray           # [K, 4]  (kx, ky, phase, weight)
+    per: np.ndarray              # [n_boundaries, K, 4]
+
+    @classmethod
+    def make(cls, n_boundaries: int, rng: np.random.Generator, *, amp_um: float = 4.0,
+             k: int = 4, corr_um: float = 450.0) -> "BoundaryUndulation":
+        def comps(n):
+            f = (2.0 * np.pi) / (corr_um * rng.uniform(0.7, 2.5, (n, k)))
+            ang = rng.uniform(0.0, 2.0 * np.pi, (n, k))
+            return np.stack([f * np.cos(ang), f * np.sin(ang),
+                             rng.uniform(0.0, 2.0 * np.pi, (n, k)),
+                             rng.uniform(0.4, 1.0, (n, k))], axis=-1)
+        return cls(amp_um, comps(1)[0], comps(n_boundaries))
+
+    @staticmethod
+    def _eval(c: np.ndarray, x: np.ndarray, y: float) -> np.ndarray:
+        kx, ky, ph, w = c[:, 0], c[:, 1], c[:, 2], c[:, 3]
+        phase = kx[None, :] * x[:, None] + ky[None, :] * y + ph[None, :]
+        return (w[None, :] * np.sin(phase)).sum(axis=1) / np.sqrt((w ** 2).sum())
+
+    def displace(self, i: int, x: np.ndarray, y: float) -> np.ndarray:
+        j = min(i, self.per.shape[0] - 1)
+        return self.amp_um * (0.6 * self._eval(self.shared, x, y)
+                              + 0.7 * self._eval(self.per[j], x, y))
 
 
 @dataclass
@@ -119,12 +161,24 @@ class RetinaModel:
     onh_cup_depth_um: float = 320.0
     vessels: list = field(default_factory=list)
     curvature_radius_um: float = 22000.0  # gentle global dome (eye curvature)
+    tilt_um_per_mm: float = 0.0           # global B-scan tilt (per-eye)
+    pit_asymmetry: float = 0.0            # -1..1 skew of the two foveal walls
+    undulation: object = None            # BoundaryUndulation | None
+    # realism texture (propagated onto every CrossSection; see the builder)
+    texture_contrast: float = 0.22       # slow intra-layer mottling depth
+    interface_jitter: float = 0.30       # lateral break-up of specular interfaces
+    vitreous_backscatter: float = 5.0e-4  # faint vitreous fill (not pure black)
 
     def cross_section(self, y_um: float, x_axis_um: np.ndarray,
                       wavelength_nm: float = REF_WAVELENGTH_NM) -> CrossSection:
         if self.location == "onh":
-            return self._onh_cross_section(y_um, x_axis_um, wavelength_nm)
-        return self._layered_cross_section(y_um, x_axis_um, wavelength_nm)
+            cross = self._onh_cross_section(y_um, x_axis_um, wavelength_nm)
+        else:
+            cross = self._layered_cross_section(y_um, x_axis_um, wavelength_nm)
+        cross.texture_contrast = self.texture_contrast
+        cross.interface_jitter = self.interface_jitter
+        cross.vitreous_backscatter = self.vitreous_backscatter
+        return cross
 
     @staticmethod
     def _layer_optics(layers, wavelength_nm):
@@ -138,11 +192,23 @@ class RetinaModel:
         return np.array(bs), np.array(mut)
 
     def _contour(self, x: np.ndarray) -> np.ndarray:
-        xc = x - x.mean()
-        return (xc * xc) / (2.0 * self.curvature_radius_um)
+        # dome centred on the ANATOMIC centre (not the FOV midpoint) + a global tilt
+        xc = x - self.center_x_um
+        dome = (xc * xc) / (2.0 * self.curvature_radius_um)
+        tilt = self.tilt_um_per_mm * 1e-3 * (x - x.mean())
+        return dome + tilt
+
+    def _undulate(self, opt_b: np.ndarray, x: np.ndarray, y_um: float) -> None:
+        """Add per-boundary undulation in place, then keep boundaries monotone."""
+        if self.undulation is None:
+            return
+        for i in range(opt_b.shape[0]):
+            opt_b[i] = opt_b[i] + self.undulation.displace(i, x, y_um)
+        for i in range(1, opt_b.shape[0]):
+            opt_b[i] = np.maximum(opt_b[i], opt_b[i - 1] + 0.5)  # min gap; no crossing
 
     def _assemble(self, x, t_phys, n_arr, depression, base_opt, backscatter, mu_t,
-                  interface, names) -> CrossSection:
+                  interface, names, y_um: float = 0.0) -> CrossSection:
         """Stack per-column boundaries from thicknesses, anchored posteriorly."""
         n_x = x.size
         L = t_phys.shape[0]
@@ -154,6 +220,7 @@ class RetinaModel:
         opt_b[0] = ilm_opt + depression
         for i in range(L):
             opt_b[i + 1] = opt_b[i] + opt_thick[i]
+        self._undulate(opt_b, x, y_um)
         phys_b = np.zeros((L + 1, n_x))
         for i in range(L):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
@@ -171,8 +238,12 @@ class RetinaModel:
 
         if self.location == "macula":
             r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
-            # smootherstep for a gentle, non-peaky parafoveal ridge
-            ss = _smootherstep(0.0, self.pit_radius_um, r_fov)        # 0 centre -> 1 outside
+            # per-column pit radius so the two foveal walls can differ (asymmetry);
+            # smootherstep gives a gentle, non-peaky parafoveal ridge.
+            side = np.tanh((x - self.center_x_um) / 150.0)            # smooth -1..1
+            pit_r = self.pit_radius_um * (1.0 + 0.35 * self.pit_asymmetry * side)
+            t = np.clip(r_fov / np.maximum(pit_r, 1e-6), 0.0, 1.0)
+            ss = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)           # 0 centre -> 1 outside
             for i, ly in enumerate(layers):
                 if ly.group == "nfl":
                     t_phys[i] = base_t[i] * (0.02 + 0.98 * ss)
@@ -188,7 +259,7 @@ class RetinaModel:
         cross = self._assemble(
             x, t_phys, n_arr, self._contour(x), base_opt, bs, mut,
             [ly.interface_reflectivity for ly in layers],
-            [ly.name for ly in layers])
+            [ly.name for ly in layers], y_um=y_um)
         # choroidal vascular texture (large lucencies below the RPE)
         choroid_idx = [i for i, ly in enumerate(layers) if ly.group == "choroid"]
         if choroid_idx:
@@ -233,6 +304,7 @@ class RetinaModel:
         opt_b[0] = self.surface_opt_um + cup + self._contour(x)
         for i in range(len(order)):
             opt_b[i + 1] = opt_b[i] + opt_thick[i]
+        self._undulate(opt_b, x, y_um)
         phys_b = np.zeros((len(order) + 1, n_x))
         for i in range(len(order)):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
@@ -250,10 +322,9 @@ def default_retina(*, location: str = "macula", surface_opt_um: float = 200.0,
                    center_x_um: float = 500.0, lateral_fov_um: float = 1000.0) -> RetinaModel:
     """A fixed, reasonable retina (no randomness) for previews/tests."""
     vessels = [
-        BloodVessel(x0_um=center_x_um - 300.0, y0_um=0.0,
-                    depth_opt_um=surface_opt_um + 25.0, caliber_um=70.0, shadow_od=1.1),
-        BloodVessel(x0_um=center_x_um + 320.0, y0_um=0.0,
-                    depth_opt_um=surface_opt_um + 30.0, caliber_um=55.0, shadow_od=0.9),
+        BloodVessel(x0_um=center_x_um - 300.0, y0_um=0.0, caliber_um=70.0, shadow_od=1.1),
+        BloodVessel(x0_um=center_x_um + 320.0, y0_um=0.0, caliber_um=55.0,
+                    plexus_offset_um=25.0, shadow_od=0.9),
     ]
     return RetinaModel(location=location, surface_opt_um=surface_opt_um,
                        center_x_um=center_x_um, vessels=vessels)
@@ -269,25 +340,31 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
     """
     layers = []
     for ly in RETINA_LAYERS:
-        t = ly.thickness_um * float(rng.uniform(0.85, 1.15))
-        b = ly.backscatter * float(rng.uniform(0.8, 1.2))
-        layers.append(RetinaLayer(ly.name, t, ly.n, b, ly.mu_s_per_mm, ly.group,
-                                  ly.interface_reflectivity))
+        # replace() preserves water_fraction + melanin (positional rebuild dropped them,
+        # silently killing RPE/choroid NIR absorption across the whole randomized corpus).
+        layers.append(replace(ly,
+                              thickness_um=ly.thickness_um * float(rng.uniform(0.85, 1.15)),
+                              backscatter=ly.backscatter * float(rng.uniform(0.8, 1.2))))
     center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-80, 80))
 
     n_vessels = int(rng.integers(2, 6))
-    plexus = surface_opt_um + float(rng.uniform(15.0, 45.0))
     vessels = []
     for _ in range(n_vessels):
         vx = float(rng.uniform(0.1, 0.9)) * lateral_fov_um
         if location == "macula" and abs(vx - center_x) < 250.0:
-            vx += 300.0 * np.sign(vx - center_x + 1e-9)   # keep the fovea avascular
+            vx += 300.0 * np.sign(vx - center_x + 1e-9)   # keep the fovea avascular (FAZ)
+        cal = float(rng.uniform(30.0, 120.0))
+        # large trunks ride the superficial plexus; small vessels can sit deeper
+        plexus = 0.0 if cal > 80.0 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))
         vessels.append(BloodVessel(
-            x0_um=vx, y0_um=float(rng.uniform(-200, 200)),
-            depth_opt_um=plexus + float(rng.uniform(-8, 8)),
-            caliber_um=float(rng.uniform(30.0, 120.0)),
+            x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=cal,
+            plexus_offset_um=plexus + float(rng.uniform(0.0, 8.0)),
             slope=float(rng.uniform(-0.4, 0.4)),
             shadow_od=float(rng.uniform(0.7, 1.5))))
+
+    undulation = BoundaryUndulation.make(
+        len(RETINA_LAYERS) + 2, rng,
+        amp_um=float(rng.uniform(2.0, 6.0)), corr_um=float(rng.uniform(350.0, 600.0)))
 
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
@@ -297,4 +374,10 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         curvature_radius_um=float(rng.uniform(16000.0, 30000.0)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
+        tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
+        pit_asymmetry=float(rng.uniform(-0.5, 0.5)),
+        undulation=undulation,
+        texture_contrast=float(rng.uniform(0.16, 0.30)),
+        interface_jitter=float(rng.uniform(0.20, 0.40)),
+        vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         vessels=vessels)
