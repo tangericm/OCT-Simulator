@@ -59,7 +59,7 @@ class RetinaLayer:
 # alternation (NFL/IPL/OPL/EZ/RPE bright; GCL/INL/ONL dark) is the meaningful part.
 # Contrast widened and the outer complex brightened to match clinical B-scans.
 RETINA_LAYERS: list[RetinaLayer] = [
-    RetinaLayer("NFL", 30.0, 1.38, 5.5e-2, 4.5, "nfl", interface_reflectivity=0.05),
+    RetinaLayer("NFL", 30.0, 1.38, 5.5e-2, 4.5, "nfl", interface_reflectivity=0.02),
     RetinaLayer("GCL", 38.0, 1.38, 6.0e-3, 1.6, "inner"),
     RetinaLayer("IPL", 40.0, 1.38, 2.8e-2, 3.0, "inner"),
     RetinaLayer("INL", 30.0, 1.38, 5.0e-3, 1.5, "inner"),
@@ -93,6 +93,7 @@ class CrossSection:
     interface_jitter: float = 0.0        # lateral break-up of specular interfaces
     vitreous_backscatter: float = 0.0    # faint fill above the ILM (not pure black)
     layer_directional: object = None     # [L, n_x] per-column directional gain (or None)
+    boundary_sharpness_um: float = 0.0   # axial transition width (softens the bands)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -161,7 +162,13 @@ class RetinaModel:
     onh_radius_um: float = 850.0
     onh_cup_depth_um: float = 320.0
     vessels: list = field(default_factory=list)
-    curvature_radius_um: float = 22000.0  # gentle global dome (eye curvature)
+    # global curvature: concave-up posterior-pole bowl (center deepest), saturating so
+    # a wide scan stays in-window. `curvature_radius_um` sets the near-fovea radius.
+    curvature_radius_um: float = 37500.0
+    curvature_sag_um: float = 520.0       # max peripheral rise of the bowl
+    curvature_concave: bool = True        # True = bowl (real posterior pole); False = legacy dome
+    boundary_sharpness_um: float = 5.0    # axial reflectivity-transition width (softens bands)
+    choroid_contrast: float = 0.55        # choroidal vascular lucency depth
     tilt_um_per_mm: float = 0.0           # global B-scan tilt (per-eye)
     pit_asymmetry: float = 0.0            # -1..1 skew of the two foveal walls
     undulation: object = None            # BoundaryUndulation | None
@@ -182,6 +189,7 @@ class RetinaModel:
         cross.texture_contrast = self.texture_contrast
         cross.interface_jitter = self.interface_jitter
         cross.vitreous_backscatter = self.vitreous_backscatter
+        cross.boundary_sharpness_um = self.boundary_sharpness_um
         groups = [ly.group for ly in self.layers] if self.location != "onh" \
             else self._onh_groups(len(cross.label_names))
         cross.layer_directional = self._directional_gain(
@@ -241,11 +249,25 @@ class RetinaModel:
         return np.array(bs), np.array(mut)
 
     def _contour(self, x: np.ndarray) -> np.ndarray:
-        # dome centred on the ANATOMIC centre (not the FOV midpoint) + a global tilt
+        """Global posterior-pole curvature (optical-depth offset added to every boundary).
+
+        The real posterior pole images **concave-up** (a bowl: the macula sits deepest and
+        the retina rises toward the periphery), the opposite of a convex dome. A saturating
+        form gives the configured near-fovea radius at the centre but flattens far out, so a
+        wide scan curves realistically yet stays inside the depth window. Centred on the
+        anatomic centre; a per-eye tilt is added.
+        """
         xc = x - self.center_x_um
-        dome = (xc * xc) / (2.0 * self.curvature_radius_um)
+        R = self.curvature_radius_um
+        sag_max = self.curvature_sag_um
+        if R <= 0 or sag_max <= 0:
+            bowl = np.zeros_like(x, dtype=float)
+        else:
+            bowl = sag_max * (1.0 - np.exp(-(xc * xc) / (2.0 * R * sag_max)))
+        # concave-up: centre deepest (largest offset), periphery shallow (0)
+        depth = (bowl.max() - bowl) if self.curvature_concave else bowl
         tilt = self.tilt_um_per_mm * 1e-3 * (x - x.mean())
-        return dome + tilt
+        return depth + tilt
 
     def _undulate(self, opt_b: np.ndarray, x: np.ndarray, y_um: float) -> None:
         """Add per-boundary undulation in place, then keep boundaries monotone."""
@@ -314,7 +336,8 @@ class RetinaModel:
         if choroid_idx:
             i = choroid_idx[0]
             cross.features.append(ChoroidTexture(
-                top_opt=cross.opt_b[i], bot_opt=cross.opt_b[i + 1]))
+                top_opt=cross.opt_b[i], bot_opt=cross.opt_b[i + 1],
+                contrast=self.choroid_contrast))
         return cross
 
     def _onh_cross_section(self, y_um, x_axis_um, wavelength_nm) -> CrossSection:
@@ -420,7 +443,10 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         center_y_um=float(rng.uniform(-100, 100)),
         pit_radius_um=float(rng.uniform(550.0, 850.0)),
         onl_bulge=float(rng.uniform(0.4, 0.7)),
-        curvature_radius_um=float(rng.uniform(16000.0, 30000.0)),
+        curvature_radius_um=float(rng.uniform(30000.0, 48000.0)),
+        curvature_sag_um=float(rng.uniform(420.0, 640.0)),
+        boundary_sharpness_um=float(rng.uniform(4.0, 7.0)),
+        choroid_contrast=float(rng.uniform(0.45, 0.62)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
         tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
