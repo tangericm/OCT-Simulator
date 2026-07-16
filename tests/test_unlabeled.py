@@ -49,12 +49,27 @@ def test_speckle_contrast_is_rayleigh_ish():
 
 
 def test_bundled_texture_loads_and_is_sane():
-    prof = ul.bundled_texture()                  # Srinivasan NORMAL
-    assert prof.n_images > 500
+    prof = ul.bundled_texture()                  # pooled multi-dataset NORMAL prior
+    assert prof.n_images > 1500                  # Srinivasan + OCTDL pooled
+    assert "pooled" in prof.source
     assert 200.0 < prof.total_retina_um_mean < 420.0    # normal retinal thickness
     assert prof.curvature_concave_frac > 0.6            # real retina images concave-up
     assert 0.4 < prof.speckle_contrast < 0.75
     assert len(prof.reflectivity_template) == ul.N_TEMPLATE
+    # the single-dataset profiles are still available
+    assert ul.bundled_texture("srinivasan").n_images > 1000
+    assert ul.bundled_texture("octdl").n_images > 200
+
+
+def test_pool_textures_weights_by_count():
+    a = ul.bundled_texture("srinivasan")
+    b = ul.bundled_texture("octdl")
+    pooled = ul.pool_textures([a, b])
+    assert pooled.n_images == a.n_images + b.n_images
+    # weighted mean lies between the two, nearer the larger (Srinivasan) dataset
+    lo, hi = sorted([a.speckle_contrast, b.speckle_contrast])
+    assert lo <= pooled.speckle_contrast <= hi
+    assert abs(pooled.speckle_contrast - a.speckle_contrast) < abs(pooled.speckle_contrast - b.speckle_contrast)
 
 
 def test_layer_reflectivity_from_template_orders_bright_dark():

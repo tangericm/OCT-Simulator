@@ -64,17 +64,44 @@ class TextureProfile:
             return cls(**json.load(fh))
 
 
-#: bundled texture profiles fitted on public unlabeled datasets.
-_BUNDLED_TEXTURE = {"srinivasan": "texture_srinivasan.json", "normal": "texture_srinivasan.json",
-                    "default": "texture_srinivasan.json"}
+#: bundled texture profiles fitted on public unlabeled NORMAL datasets. The default is the
+#: multi-dataset pool (Srinivasan + OCTDL); the single-dataset profiles are kept too.
+_BUNDLED_TEXTURE = {"default": "texture_pooled.json", "normal": "texture_pooled.json",
+                    "pooled": "texture_pooled.json", "srinivasan": "texture_srinivasan.json",
+                    "octdl": "texture_octdl.json"}
 
 
 def bundled_texture(name: str = "default") -> TextureProfile:
-    """Load a bundled :class:`TextureProfile` (default: Srinivasan-2014 NORMAL, 1407 B-scans)."""
+    """Load a bundled :class:`TextureProfile` (default: the pooled multi-dataset NORMAL prior)."""
     fn = _BUNDLED_TEXTURE.get(name, name)
     if not os.path.isabs(fn):
         fn = os.path.join(os.path.dirname(__file__), fn)
     return TextureProfile.load(fn)
+
+
+def pool_textures(profiles) -> TextureProfile:
+    """Pool several :class:`TextureProfile` (from different datasets) into one, weighting each
+    field by that dataset's B-scan count. The reflectivity templates share a fixed normalised
+    axis, so they average directly. Use this to build a broad multi-dataset NORMAL prior."""
+    profiles = [p for p in profiles if p and p.n_images > 0]
+    if not profiles:
+        raise ValueError("no profiles to pool")
+    w = np.array([p.n_images for p in profiles], float)
+    w = w / w.sum()
+    wavg = lambda a: float(np.dot(w, [getattr(p, a) for p in profiles]))
+    tpl = np.average(np.array([p.reflectivity_template for p in profiles]), axis=0, weights=w)
+    hists = [p.intensity_hist for p in profiles if len(p.intensity_hist)]
+    return TextureProfile(
+        reflectivity_template=tpl.tolist(), template_axis=list(profiles[0].template_axis),
+        speckle_contrast=wavg("speckle_contrast"), heterogeneity=wavg("heterogeneity"),
+        axial_grain_um=wavg("axial_grain_um"), lateral_grain_um=wavg("lateral_grain_um"),
+        noise_floor_frac=wavg("noise_floor_frac"),
+        total_retina_um_mean=wavg("total_retina_um_mean"),
+        total_retina_um_std=wavg("total_retina_um_std"),
+        curvature_concave_frac=wavg("curvature_concave_frac"),
+        intensity_hist=(np.average(np.array(hists), axis=0).tolist() if hists else []),
+        n_images=int(sum(p.n_images for p in profiles)),
+        source="pooled[" + " + ".join(p.source for p in profiles) + "]")
 
 
 # --------------------------------------------------------------------------- io
