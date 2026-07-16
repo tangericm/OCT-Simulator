@@ -31,6 +31,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from . import _fft
 from .dispersion import apply_dispersion
 from .optics import sensitivity_falloff
 from .source import LightSource
@@ -73,7 +74,7 @@ def synthesize_bscan_spectra(
     carrier = np.exp(1j * 2.0 * k[0] * depth)[:, None]     # exp(i 2 k_min z_p)
     g = np.zeros((n_k, n_x), dtype=np.complex128)
     g[:n_depth] = r * carrier
-    e_s = n_k * np.fft.ifft(g, axis=0)                     # = Σ_p r_p exp(i 2 k z_p)
+    e_s = n_k * _fft.ifft(g, axis=0)                       # = Σ_p r_p exp(i 2 k z_p)
 
     if dispersion_coeffs:
         e_s = apply_dispersion(e_s, k, source.k0, dispersion_coeffs)
