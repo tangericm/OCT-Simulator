@@ -342,20 +342,29 @@ def average_profiles(profiles: list) -> CalibrationProfile:
 
 
 # --------------------------------------------------------------------------- apply
-#: how each of the 11 model layers draws from the 7 Duke layers (name, duke_layer, split).
-#: fractions are computed from the canonical table so a Duke layer splits by literature ratio.
-def _duke_split_map():
+def _layer_split_map(source_names):
+    """Map the sim's 11 layers onto a segmentation scheme's layers ``(my, source, frac)``.
+
+    Handles both the Duke DME 7-layer scheme (``GCLIPL``, merged ``OSRPE``) and the JHU
+    8-layer scheme (``GCIP``, separate ``OS``/``RPE``). Combined source layers are split by
+    the canonical thickness ratios; the choroid stays parametric (``source=None``).
+    """
     from .anatomy.retina import RETINA_LAYERS
     t = {ly.name: ly.thickness_um for ly in RETINA_LAYERS}
     gcl = t["GCL"] / (t["GCL"] + t["IPL"])
     elm = t["ELM"] / (t["ELM"] + t["EZ"])
     iz = t["IZ"] / (t["IZ"] + t["RPE"])
-    return [
-        ("NFL", "RNFL", 1.0), ("GCL", "GCLIPL", gcl), ("IPL", "GCLIPL", 1 - gcl),
-        ("INL", "INL", 1.0), ("OPL", "OPL", 1.0), ("ONL", "ONL", 1.0),
-        ("ELM", "IS", elm), ("EZ", "IS", 1 - elm), ("IZ", "OSRPE", iz),
-        ("RPE", "OSRPE", 1 - iz), ("choroid", None, None),
-    ]
+    s = set(source_names)
+    gcip = "GCIP" if "GCIP" in s else "GCLIPL"
+    m = [("NFL", "RNFL", 1.0), ("GCL", gcip, gcl), ("IPL", gcip, 1 - gcl),
+         ("INL", "INL", 1.0), ("OPL", "OPL", 1.0), ("ONL", "ONL", 1.0),
+         ("ELM", "IS", elm), ("EZ", "IS", 1 - elm)]
+    if "OS" in s:                          # JHU: OS and RPE segmented separately
+        m += [("IZ", "OS", 1.0), ("RPE", "RPE", 1.0)]
+    else:                                  # Duke: OS+RPE merged
+        m += [("IZ", "OSRPE", iz), ("RPE", "OSRPE", 1 - iz)]
+    m += [("choroid", None, None)]
+    return m
 
 
 def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "CalibrationProfile | None" = None,
@@ -372,9 +381,9 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
 
     optics = optics or literature_profile()
     opt_by_name = {ly.name: ly for ly in optics.layers}
-    sampled = shape.sample(rng, scale=sample_scale)          # [7, n_ecc] µm
+    sampled = shape.sample(rng, scale=sample_scale)          # [n_layer, n_ecc] µm
     duke_idx = {nm: i for i, nm in enumerate(shape.layer_names)}
-    smap = _duke_split_map()
+    smap = _layer_split_map(shape.layer_names)
 
     n_ecc = shape.ecc_grid_um.size
     data_thick = np.zeros((len(RETINA_LAYERS), n_ecc))

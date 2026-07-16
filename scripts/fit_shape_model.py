@@ -24,18 +24,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", required=True, help="folder of Subject_*.mat (Duke DME)")
-    ap.add_argument("--out", default="octsim/data/retina_shape_duke.npz")
-    ap.add_argument("--dataset", default="duke_dme", choices=["duke_dme"])
-    ap.add_argument("--grader", type=int, default=1)
+    ap.add_argument("--root", required=True,
+                    help="dataset folder (Duke: Subject_*.mat; JHU: *_spectralis_macula_*.mat)")
+    ap.add_argument("--dataset", default="jhu_hc", choices=["jhu_hc", "duke_dme"])
+    ap.add_argument("--out", default="octsim/data/retina_shape_jhu_hc.npz")
+    ap.add_argument("--groups", default="hc", help="JHU cohorts, comma-sep (hc,ms)")
+    ap.add_argument("--grader", type=int, default=1, help="Duke grader (1 or 2)")
     ap.add_argument("--n-modes", type=int, default=8)
     ap.add_argument("--max-total-um", type=float, default=360.0,
                     help="drop scans thicker than this (edema filter)")
     args = ap.parse_args()
 
-    from octsim.data import duke_dme as dd
-    sm = dd.fit_shape_model(args.root, grader=args.grader, n_modes=args.n_modes,
-                            max_total_um=args.max_total_um)
+    if args.dataset == "jhu_hc":
+        from octsim.data import jhu_hc
+        sm = jhu_hc.fit_shape_model(args.root, groups=tuple(args.groups.split(",")),
+                                    n_modes=args.n_modes, max_total_um=args.max_total_um)
+    else:
+        from octsim.data import duke_dme as dd
+        sm = dd.fit_shape_model(args.root, grader=args.grader, n_modes=args.n_modes,
+                                max_total_um=args.max_total_um)
     sm.save(args.out)
     ev = sm.explained_variance_ratio
     print(f"fit {sm.n_scans} scans -> {args.out} ({os.path.getsize(args.out)} bytes)")
