@@ -46,12 +46,14 @@ def synthesize_bscan_spectra(
     signal_scale: float = 1.0,
     motion_dz_um: np.ndarray | None = None,
     washout_gain: np.ndarray | None = None,
+    column_phase: np.ndarray | None = None,
 ) -> np.ndarray:
     """Raw spectral interferogram ``[n_k, n_x]`` from a reflectivity field.
 
     ``reflectivity`` is complex ``[n_depth, n_x]`` on the reconstruction depth grid
-    (``n_depth == source.n_k // 2``). ``motion_dz_um`` / ``washout_gain`` are optional
-    per-column (length ``n_x``) arrays for bulk axial motion and fringe washout.
+    (``n_depth == source.n_k // 2``). Optional per-column (length ``n_x``) arrays:
+    ``motion_dz_um`` (bulk axial motion → k-dependent depth phase), ``washout_gain``
+    (fringe-washout contrast loss), and ``column_phase`` (k-independent phase drift).
     Returns the real detector spectra a swept source would digitise, one per A-scan.
     """
     r = np.asarray(reflectivity)
@@ -79,6 +81,8 @@ def synthesize_bscan_spectra(
         e_s = e_s * float(signal_scale)
     if washout_gain is not None:
         e_s = e_s * np.asarray(washout_gain, dtype=np.float64)[None, :]
+    if column_phase is not None:
+        e_s = e_s * np.exp(1j * np.asarray(column_phase, dtype=np.float64))[None, :]
     if motion_dz_um is not None:
         dz = np.asarray(motion_dz_um, dtype=np.float64)
         e_s = e_s * np.exp(1j * 2.0 * np.outer(k, dz))     # per-column depth phase
