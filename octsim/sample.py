@@ -173,9 +173,15 @@ def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:
     t = np.arange(-half, half + 1)
     k = np.exp(-2.0 * (t / waist_px) ** 2)
     k = k / k.sum()
-    pad = np.pad(r, ((0, 0), (half, half)), mode="reflect")
-    # row-wise 'valid' convolution -> same length as r along x
-    out = np.empty_like(r)
-    for row in range(r.shape[0]):
-        out[row] = np.convolve(pad[row], k, mode="valid")
-    return out
+    # Vectorized separable convolution along x via scipy (falls back to numpy):
+    # convolve1d over axis=1 in one call instead of a per-depth-row Python loop.
+    try:
+        # scipy 'mirror' == numpy pad 'reflect' (edge sample not repeated).
+        from scipy.ndimage import convolve1d
+        return convolve1d(r, k, axis=1, mode="mirror")
+    except Exception:
+        pad = np.pad(r, ((0, 0), (half, half)), mode="reflect")
+        out = np.empty_like(r)
+        for row in range(r.shape[0]):
+            out[row] = np.convolve(pad[row], k, mode="valid")
+        return out

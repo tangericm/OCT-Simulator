@@ -36,6 +36,15 @@ class NoiseModel:
         """A mild, visually realistic default (shot-dominated floor)."""
         return cls(shot=0.03, rin=0.005, read=0.01)
 
+    @classmethod
+    def none(cls) -> "NoiseModel":
+        """A noise-free model (all components zero) for clean data."""
+        return cls(shot=0.0, rin=0.0, read=0.0)
+
+    @property
+    def is_noise_free(self) -> bool:
+        return not (self.shot or self.rin or self.read)
+
     def apply(self, spectrum: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """Return ``spectrum`` with additive noise (does not mutate the input)."""
         if not (self.shot or self.rin or self.read):
