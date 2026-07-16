@@ -37,28 +37,35 @@ class BloodVessel:
     shadow_od: float = 1.2
     lumen_gain: float = 0.15
 
+    #: brightness of the hyperreflective vessel wall (relative reflectivity) — subtle
+    wall_amp: float = 1.6e-2
+
     def apply(self, r: np.ndarray, ctx) -> None:
         y = ctx.y_um
         if abs(y - self.y0_um) > self.y_half_extent_um:
             return
+        depth = ctx.depth_axis_um
         x = ctx.x_axis_um
         if x.size < 2:
             return
-        dx = x[1] - x[0]
-        dz = ctx.dz
         xv = self.x0_um + self.slope * (y - self.y0_um)
-        n_depth, n_x = r.shape
+        cal = max(self.caliber_um, 1e-6)
 
-        col = (x - xv) / max(0.5 * self.caliber_um, 1e-6)          # [n_x], normalized
-        zc = self.depth_opt_um / dz
-        row = (np.arange(n_depth) - zc) / max(0.5 * self.caliber_um / dz, 1e-6)
+        # slightly vertically-oval footprint (real vessels read a touch taller than wide)
+        X = (x[None, :] - xv) / (0.5 * cal)                        # [1, n_x]
+        Z = (depth[:, None] - self.depth_opt_um) / (0.62 * cal)    # [n_depth, 1]
+        rr = X ** 2 + Z ** 2
 
-        # dark lumen (elliptical disk at the vessel)
-        disk = (row[:, None] ** 2 + col[None, :] ** 2) <= 1.0
-        r[disk] *= self.lumen_gain
+        lumen = rr <= 1.0
+        wall = (rr > 1.0) & (rr <= 1.4)                            # thin hyperreflective wall ring
+        r[lumen] *= self.lumen_gain
+        if self.wall_amp > 0 and np.any(wall):
+            g = (ctx.rng.standard_normal(r.shape)
+                 + 1j * ctx.rng.standard_normal(r.shape)) / np.sqrt(2.0)
+            r[wall] += self.wall_amp * g[wall]
 
-        # shadow: attenuate everything below the vessel within its lateral footprint
-        under_col = np.abs(col) <= 1.0                            # [n_x]
-        below = np.arange(n_depth)[:, None] > zc                  # [n_depth, 1]
-        shadow_mask = below & under_col[None, :]
-        r *= np.where(shadow_mask, np.exp(-self.shadow_od), 1.0)
+        # graded posterior shadow: full under the lumen centre, tapering laterally,
+        # only below the vessel (smooth, no hard-edged band).
+        lateral = np.exp(-((x - xv) / (0.6 * cal)) ** 2)[None, :]  # [1, n_x]
+        below = (depth[:, None] > self.depth_opt_um).astype(float)
+        r *= 1.0 - (1.0 - np.exp(-self.shadow_od)) * lateral * below

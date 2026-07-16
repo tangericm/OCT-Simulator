@@ -106,17 +106,44 @@ class RetinaModel:
     curvature_radius_um: float = 12000.0  # gentle global contour
 
     def cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
+        if self.location == "onh":
+            return self._onh_cross_section(y_um, x_axis_um)
+        return self._layered_cross_section(y_um, x_axis_um)
+
+    def _contour(self, x: np.ndarray) -> np.ndarray:
+        xc = x - x.mean()
+        return (xc * xc) / (2.0 * self.curvature_radius_um)
+
+    def _assemble(self, x, t_phys, n_arr, depression, base_opt, backscatter, mu_t,
+                  interface, names) -> CrossSection:
+        """Stack per-column boundaries from thicknesses, anchored posteriorly."""
+        n_x = x.size
+        L = t_phys.shape[0]
+        opt_thick = n_arr[:, None] * t_phys
+        # ILM anchored so the RPE/choroid boundary is flat (macula/periphery); the
+        # anchor uses the neurosensory retina (everything above `choroid`).
+        ilm_opt = base_opt - opt_thick[:-1].sum(axis=0)
+        opt_b = np.zeros((L + 1, n_x))
+        opt_b[0] = ilm_opt + depression
+        for i in range(L):
+            opt_b[i + 1] = opt_b[i] + opt_thick[i]
+        phys_b = np.zeros((L + 1, n_x))
+        for i in range(L):
+            phys_b[i + 1] = phys_b[i] + t_phys[i]
+        return CrossSection(opt_b=opt_b, phys_b=phys_b, layer_n=n_arr,
+                            layer_backscatter=backscatter, layer_mu_t=mu_t,
+                            layer_interface=interface, top_n=self.top_n,
+                            features=list(self.vessels), label_names=names)
+
+    def _layered_cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
         x = np.asarray(x_axis_um, float)
         n_x = x.size
         layers = self.layers
-        L = len(layers)
-
         base_t = np.array([ly.thickness_um for ly in layers])[:, None] * np.ones((1, n_x))
         t_phys = base_t.copy()
 
-        r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
-
         if self.location == "macula":
+            r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
             ss = _smoothstep(0.0, self.pit_radius_um, r_fov)          # 0 centre -> 1 outside
             for i, ly in enumerate(layers):
                 if ly.group == "nfl":
@@ -126,43 +153,66 @@ class RetinaModel:
                 elif ly.group == "onl":
                     t_phys[i] = base_t[i] * (1.0 + self.onl_bulge * (1.0 - ss))
 
-        depression = np.zeros(n_x)
-        if self.location == "onh":
-            r_onh = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
-            taper = _smoothstep(0.5 * self.onh_radius_um, self.onh_radius_um, r_onh)
-            for i, ly in enumerate(layers):
-                if ly.group != "choroid":
-                    t_phys[i] = base_t[i] * taper
-            depression = self.onh_cup_depth_um * (1.0 - _smoothstep(0.0, self.onh_radius_um, r_onh))
-
-        # global contour (gentle) + ONH excavation
-        xc = x - x.mean()
-        contour = (xc * xc) / (2.0 * self.curvature_radius_um)
-        depression = depression + contour
-
         n_arr = np.array([ly.n for ly in layers])
-        opt_thick = n_arr[:, None] * t_phys                          # [L, n_x]
         base_opt = self.surface_opt_um + float(np.sum(
             [ly.n * ly.thickness_um for ly in layers if ly.group != "choroid"]))
-        ilm_opt = base_opt - opt_thick[:-1].sum(axis=0)              # exclude choroid from anchor
+        return self._assemble(
+            x, t_phys, n_arr, self._contour(x), base_opt,
+            np.array([ly.backscatter for ly in layers]),
+            np.array([ly.mu_s_per_mm * 1e-3 for ly in layers]),
+            [ly.interface_reflectivity for ly in layers],
+            [ly.name for ly in layers])
 
-        opt_b = np.zeros((L + 1, n_x))
-        opt_b[0] = ilm_opt + depression
-        for i in range(L):
+    def _onh_cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
+        """Optic nerve head: outer bands TERMINATE at Bruch's-membrane opening, a
+        central cup, RNFL thickening toward the disc, and a medium-reflective
+        neural-canal fill (informed by clinical ONH OCT morphology)."""
+        x = np.asarray(x_axis_um, float)
+        n_x = x.size
+        r_onh = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
+        bmo = self.onh_radius_um
+
+        # term_outer: 1 outside the disc, 0 inside — a SHARP termination at the BMO.
+        term_outer = _smoothstep(bmo - 40.0, bmo + 40.0, r_onh)
+        rim_ramp = 1.0 - _smoothstep(bmo, bmo + 280.0, r_onh)         # RNFL thickens toward disc
+        cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.15 * bmo, bmo, r_onh))
+
+        # layer stack: insert a neural-canal fill just beneath the NFL/rim.
+        src = {ly.name: ly for ly in RETINA_LAYERS}
+        order = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL", "ELM", "EZ", "IZ", "RPE", "choroid"]
+        base = {"NFL": src["NFL"].thickness_um, "canal": 0.0,
+                **{k: src[k].thickness_um for k in order if k not in ("NFL", "canal")}}
+        n_map = {**{ly.name: ly.n for ly in RETINA_LAYERS}, "canal": 1.38}
+        bs_map = {**{ly.name: ly.backscatter for ly in RETINA_LAYERS}, "canal": 2.2e-2}
+        mu_map = {**{ly.name: ly.mu_s_per_mm for ly in RETINA_LAYERS}, "canal": 3.0}
+        if_map = {**{ly.name: ly.interface_reflectivity for ly in RETINA_LAYERS}, "canal": None}
+
+        t_phys = np.zeros((len(order), n_x))
+        for i, name in enumerate(order):
+            if name == "NFL":
+                t_phys[i] = base["NFL"] * (1.0 + 2.2 * rim_ramp)      # rim thickening
+            elif name == "canal":
+                t_phys[i] = 260.0 * (1.0 - term_outer)               # fills the disc
+            else:
+                t_phys[i] = base[name] * term_outer                  # terminate at BMO
+
+        n_arr = np.array([n_map[name] for name in order])
+        # top-down anchor from a cupped ILM (the disc's defining feature is the cup)
+        opt_thick = n_arr[:, None] * t_phys
+        opt_b = np.zeros((len(order) + 1, n_x))
+        opt_b[0] = self.surface_opt_um + cup + self._contour(x)
+        for i in range(len(order)):
             opt_b[i + 1] = opt_b[i] + opt_thick[i]
-
-        phys_b = np.zeros((L + 1, n_x))
-        for i in range(L):
+        phys_b = np.zeros((len(order) + 1, n_x))
+        for i in range(len(order)):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
 
         return CrossSection(
-            opt_b=opt_b, phys_b=phys_b,
-            layer_n=n_arr,
-            layer_backscatter=np.array([ly.backscatter for ly in layers]),
-            layer_mu_t=np.array([ly.mu_s_per_mm * 1e-3 for ly in layers]),
-            layer_interface=[ly.interface_reflectivity for ly in layers],
-            top_n=self.top_n, features=list(self.vessels),
-            label_names=[ly.name for ly in layers])
+            opt_b=opt_b, phys_b=phys_b, layer_n=n_arr,
+            layer_backscatter=np.array([bs_map[name] for name in order]),
+            layer_mu_t=np.array([mu_map[name] * 1e-3 for name in order]),
+            layer_interface=[if_map[name] for name in order],
+            top_n=self.top_n, features=list(self.vessels), label_names=list(order))
 
 
 # --------------------------------------------------------------------------- builders
