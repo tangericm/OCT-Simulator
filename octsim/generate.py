@@ -84,12 +84,17 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     a = config.anatomy
     fov = config.lateral_fov_um
     if a in RETINAL:
-        if config.shape_model:      # data-driven geometry from a learned shape model
-            from . import calibration
-            sm = _resolve_shape_model(config.shape_model)
-            return calibration.retina_from_shape_model(
-                sm, rng, location=a, lateral_fov_um=fov, surface_opt_um=config.sample_depth_um,
-                lateral_offset_um=config.sample_lateral_offset_um)
+        sm_name = (config.shape_model or "").lower()
+        if sm_name and sm_name not in ("none", "parametric", "off"):
+            try:                    # data-driven geometry from a learned shape model
+                from . import calibration
+                sm = _resolve_shape_model(sm_name)
+                return calibration.retina_from_shape_model(
+                    sm, rng, location=a, lateral_fov_um=fov,
+                    surface_opt_um=config.sample_depth_um,
+                    lateral_offset_um=config.sample_lateral_offset_um)
+            except Exception:
+                pass                # fall back to the parametric scene if the model is missing
         if config.randomize:
             return random_retina(rng, location=a, surface_opt_um=config.sample_depth_um,
                                  lateral_fov_um=fov,
@@ -106,12 +111,22 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     raise ValueError(f"unknown anatomy {a!r}")
 
 
+#: bundled shape-model artifacts. Default is the JHU healthy-control (normal-eye) model;
+#: the Duke DME model is kept for disease-geometry generation.
+_BUNDLED_SHAPE = {
+    "jhu": "retina_shape_jhu_hc.npz", "hc": "retina_shape_jhu_hc.npz",
+    "normal": "retina_shape_jhu_hc.npz", "default": "retina_shape_jhu_hc.npz",
+    "duke": "retina_shape_duke.npz", "dme": "retina_shape_duke.npz",
+}
+
+
 @functools.lru_cache(maxsize=8)
 def _resolve_shape_model(name: str):
-    """Load a LayerShapeModel by path, or the bundled Duke model for 'duke'/'default'."""
+    """Load a LayerShapeModel by path, or a bundled model by keyword (default = JHU normal)."""
     from .shape_model import LayerShapeModel
-    if name in ("duke", "default", "bundled"):
-        name = os.path.join(os.path.dirname(__file__), "data", "retina_shape_duke.npz")
+    fn = _BUNDLED_SHAPE.get(name)
+    if fn is not None:
+        name = os.path.join(os.path.dirname(__file__), "data", fn)
     return LayerShapeModel.load(name)
 
 

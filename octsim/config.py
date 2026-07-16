@@ -126,8 +126,10 @@ class SimConfig:
     location: str = "macula"                # kept in sync with anatomy for retinal scenes
     sample_depth_um: float = 200.0          # optical depth of the anterior surface (sample position)
     sample_lateral_offset_um: float = 0.0   # lateral shift of the anatomy centre within the FOV
-    #: data-driven geometry: ""=parametric pit; "duke"=bundled shape model; or a .npz path.
-    shape_model: str = ""
+    #: data-driven geometry from a learned shape model: "normal"/"jhu" = bundled healthy-eye
+    #: model (default), "duke"/"dme" = diabetic-macular-edema model, a .npz path, or
+    #: "parametric"/"none" for the hand-tuned pit.
+    shape_model: str = "normal"
     reference_amp: float = 4.0
 
     # --- batch ---

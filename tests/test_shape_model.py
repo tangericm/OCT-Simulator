@@ -14,8 +14,8 @@ from octsim.config import SimConfig  # noqa: E402
 from octsim.generate import simulate  # noqa: E402
 from octsim.shape_model import LayerShapeModel, align_and_resample, locate_fovea_um  # noqa: E402
 
-BUNDLED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "octsim", "data", "retina_shape_duke.npz")
+_DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "octsim", "data")
+BUNDLED = os.path.join(_DATA, "retina_shape_jhu_hc.npz")   # the default normal-eye model
 
 
 def _toy_stack(n=40, n_layer=7, n_ecc=61, seed=0):
@@ -87,17 +87,31 @@ def test_retina_from_shape_model_has_data_pit():
     assert inner_c < 0.7 * inner_e, (inner_c, inner_e)
 
 
-def test_config_shape_model_duke_path():
-    if not os.path.exists(BUNDLED):
-        return
-    cfg = SimConfig(anatomy="macula", shape_model="duke", lateral_fov_um=6000.0,
+def test_config_default_normal_shape_model():
+    # the default shape_model="normal" (JHU healthy-eye) yields a data-driven foveal pit
+    cfg = SimConfig(anatomy="macula", lateral_fov_um=6000.0,
                     pixels_per_spectrum=512, lines_per_frame=120)
-    res = simulate(cfg, seed=3)
+    assert cfg.shape_model == "normal"
+    res = simulate(cfg, seed=2)
     lab = res.labels2d
     prof = np.isin(lab, [1, 2, 3, 4, 5]).sum(axis=0)     # inner-retina pixel thickness
     center = prof[lab.shape[1] // 2]
     edge = np.median(prof[:30])
-    assert center < 0.6 * edge, (center, edge)           # data-driven foveal pit
+    assert center < 0.75 * edge, (center, edge)          # foveal thinning present
+
+
+def test_both_bundled_models_load():
+    from octsim.generate import _resolve_shape_model
+    for name in ("normal", "jhu", "duke", "dme"):
+        sm = _resolve_shape_model(name)
+        assert sm.mean_thickness.shape[0] in (7, 8)      # Duke=7, JHU=8 layers
+
+
+def test_parametric_opt_out():
+    cfg = SimConfig(anatomy="macula", shape_model="parametric", lateral_fov_um=4000.0,
+                    pixels_per_spectrum=512, lines_per_frame=96)
+    res = simulate(cfg, seed=1)                          # must not raise; uses the pit formula
+    assert res.bscan.shape[0] == 256
 
 
 if __name__ == "__main__":

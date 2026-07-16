@@ -66,43 +66,57 @@ variation. Labels are unaffected — the simulator still emits exact layer maps.
 
 ## Statistical shape model (geometry from data)
 
-Beyond per-layer optics, the *geometry* (layer-thickness profiles, foveal-pit morphology,
-boundary roughness) is learned from real segmentations by a PCA
-`octsim.shape_model.LayerShapeModel` and sampled per eye. The repo ships a model fitted on
-the **Duke SD-OCT DME dataset** (Chiu et al., BOE 2015 — 85 near-normal scans after an edema
-filter): `octsim/data/retina_shape_duke.npz` (~80 KB). Raw data is never committed; refit with:
+Beyond per-layer optics, the *geometry* (layer-thickness profiles, foveal-pit morphology) is
+learned from real segmentations by a PCA `octsim.shape_model.LayerShapeModel` and sampled per
+eye. Two models ship (raw data is never committed — only the tiny fitted `.npz`):
 
-```bash
-# download 2015_BOE_Chiu2.zip from people.duke.edu/~sf59/Chiu_BOE_2014_dataset.htm, unzip, then
-python scripts/fit_shape_model.py --root path/to/2015_BOE_Chiu --out octsim/data/retina_shape_duke.npz
+| bundled name | file | source | use |
+| --- | --- | --- | --- |
+| `normal` / `jhu` (**default**) | `retina_shape_jhu_hc.npz` (~90 KB) | JHU **healthy controls** (He 2019, 309 foveal B-scans) | normal-eye geometry |
+| `duke` / `dme` | `retina_shape_duke.npz` (~80 KB) | Duke **DME** (Chiu 2015, 85 scans) | diabetic / edema geometry |
+
+**The default is the healthy-eye (JHU) model** — DME eyes distort the foveal contour and their
+fluid isn't a segmented class, so that geometry is unsafe as a normal prior. From the config /
+GUI / API:
+
+```python
+from octsim import SimConfig, simulate
+res = simulate(SimConfig(anatomy="macula"), seed=2)                       # normal (default)
+res = simulate(SimConfig(anatomy="macula", shape_model="dme"), seed=2)    # diabetic geometry
+res = simulate(SimConfig(anatomy="macula", shape_model="parametric"))     # hand-tuned pit
 ```
 
-Use it — geometry from data, optics from a profile, exact labels preserved:
+Or explicitly, geometry from data + optics from a profile, exact labels preserved:
 
 ```python
 import numpy as np
 from octsim import LayerShapeModel, retina_from_shape_model, literature_profile
-sm = LayerShapeModel.load("octsim/data/retina_shape_duke.npz")
+sm = LayerShapeModel.load("octsim/data/retina_shape_jhu_hc.npz")
 m = retina_from_shape_model(sm, np.random.default_rng(0), optics=literature_profile(),
                             location="macula", lateral_fov_um=6000.0)
 ```
 
-Or straight from the config / GUI (`shape_model="duke"` uses the bundled model; a path loads
-your own):
+Refit either model from the raw data (deterministic; produces the same `.npz`):
 
-```python
-from octsim import SimConfig, simulate
-res = simulate(SimConfig(anatomy="macula", shape_model="duke", lateral_fov_um=6000.0), seed=3)
+```bash
+# JHU healthy controls — download OCT_Manual_Delineations-2018_June_29_b.zip from
+# iacl.ece.jhu.edu (or the MEDIC portal), unzip, point --root at the delineation/ folder:
+python scripts/fit_shape_model.py --dataset jhu_hc --root path/to/delineation \
+    --out octsim/data/retina_shape_jhu_hc.npz
+# Duke DME — download 2015_BOE_Chiu2.zip from people.duke.edu/~sf59/Chiu_BOE_2014_dataset.htm:
+python scripts/fit_shape_model.py --dataset duke_dme --root path/to/2015_BOE_Chiu \
+    --out octsim/data/retina_shape_duke.npz
 ```
 
-The 8 Duke surfaces bound 7 layers (`RNFL, GCL+IPL, INL, OPL, ONL, IS, OS+RPE`); they are
-split onto the simulator's 11 layers by the canonical thickness ratios, and the choroid stays
-parametric. **Caveat:** Duke DME are diabetic eyes — the shipped model skews slightly thick
-even after filtering; refit on normal / Maestro segmentations for a normal-eye prior.
+The segmentation layers (Duke 7 / JHU 8) are split onto the simulator's 11 by the canonical
+thickness ratios (`calibration._layer_split_map`); the choroid stays parametric. The same API
+refits on **your Maestro segmentations** — write a loader that yields a `[N, n_layer, n_ecc]`
+thickness stack (see `octsim/data/jhu_hc.py`) and call `LayerShapeModel.fit`.
 
 ## Roadmap
 
 - **Done:** per-layer optics + curvature + boundary sharpness from data; a PCA shape model that
-  samples real foveal-pit / thickness geometry; both wired into the config/GUI.
-- **Next:** a normal-eye shape model (refit on non-DME data); include the global curvature and
-  ONL foveal bulge as learned modes; extract linear-domain optics from Maestro `.raw` recons.
+  samples real foveal-pit / thickness geometry from a **healthy-eye** dataset (default) or a DME
+  one; both wired into the config/GUI with a parametric opt-out.
+- **Next:** learn the global curvature + ONL foveal bulge as modes; a foveal-vs-parafoveal
+  sampling knob; extract linear-domain optics from Maestro `.raw` reconstructions.
