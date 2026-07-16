@@ -69,3 +69,40 @@ class BloodVessel:
         lateral = np.exp(-((x - xv) / (0.6 * cal)) ** 2)[None, :]  # [1, n_x]
         below = (depth[:, None] > self.depth_opt_um).astype(float)
         r *= 1.0 - (1.0 - np.exp(-self.shadow_od)) * lateral * below
+
+
+@dataclass
+class ChoroidTexture:
+    """Large-scale vascular lucencies of the choroid (Sattler/Haller vessels).
+
+    Modulates the reflectivity within the choroid band by a smooth low-spatial-
+    frequency random field, producing the characteristic mottled, spongy choroid with
+    darker roundish vessel lumina rather than a flat speckle field.
+    """
+
+    top_opt: np.ndarray          # [n_x] optical depth of the choroid top (per column)
+    bot_opt: np.ndarray          # [n_x] optical depth of the choroid bottom
+    blob_um: float = 180.0       # characteristic vessel size
+    contrast: float = 0.55       # depth of the lucencies (0..1)
+
+    def apply(self, r: np.ndarray, ctx) -> None:
+        depth = ctx.depth_axis_um
+        x = ctx.x_axis_um
+        n_depth, n_x = r.shape
+        top = np.interp(np.arange(n_x), np.arange(n_x), self.top_opt)
+        band = (depth[:, None] >= top[None, :]) & (depth[:, None] < self.bot_opt[None, :])
+        if not np.any(band):
+            return
+        dz = ctx.dz
+        dx = (x[1] - x[0]) if n_x > 1 else 1.0
+        # white noise smoothed to ~blob size -> low-frequency vascular field
+        field = ctx.rng.standard_normal((n_depth, n_x))
+        try:
+            from scipy.ndimage import gaussian_filter
+            field = gaussian_filter(field, (max(self.blob_um / dz, 1.0),
+                                            max(self.blob_um / dx, 1.0)))
+        except Exception:
+            pass
+        field = (field - field.mean()) / (field.std() + 1e-9)
+        gain = 1.0 + self.contrast * np.clip(field, -1.5, 1.5)
+        r[band] *= gain[band]

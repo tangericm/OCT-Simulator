@@ -48,6 +48,10 @@ of the ideal fringe the forward model folds in the instrument/acquisition physic
   washout are **correlated across A-scans and across the frames of a volume**.
 - **Detector noise** — shot (∝√I) + RIN (∝I) + read (floor), tunable clean → degraded, with a
   noise-free toggle and a target-SNR (dB) knob.
+- **Wavelength-dependent tissue optics** — scattering falls with wavelength and water/melanin
+  absorption is modelled (`tissue.py`), so 1050/1310 nm penetrate the choroid better than 830-880 nm.
+- **Averaging** — `averages` is **1 by default (raw, full-speckle)**; set it higher for ART-like
+  incoherent averaging (clinical-display look). Training data should generally stay raw.
 
 First-Born / single-scattering: every scatterer contributes once (multiple scattering not modelled).
 

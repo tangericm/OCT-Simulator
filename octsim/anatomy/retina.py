@@ -29,38 +29,47 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..features import BloodVessel
+from ..features import BloodVessel, ChoroidTexture
+from ..tissue import REF_WAVELENGTH_NM, scale_layer
 
 VITREOUS_N = 1.336
 
 
 @dataclass(frozen=True)
 class RetinaLayer:
-    """One retinal layer. ``group`` drives the foveal/ONH geometry response."""
+    """One retinal layer. ``group`` drives the foveal/ONH geometry response.
+
+    Optical properties are stored at the 850 nm reference (:mod:`octsim.tissue`) and
+    scaled to the source wavelength at render time; ``water_fraction`` and ``melanin``
+    set the wavelength-dependent absorption.
+    """
 
     name: str
     thickness_um: float          # parafoveal physical thickness
     n: float
-    backscatter: float
-    mu_s_per_mm: float
+    backscatter: float           # backscatter amplitude at 850 nm
+    mu_s_per_mm: float           # scattering coefficient at 850 nm
     group: str                   # nfl | inner | onl | photoreceptor | rpe | choroid
     interface_reflectivity: float | None = None
+    water_fraction: float = 0.65
+    melanin: float = 0.0         # pigment (RPE/choroid) — strong NIR absorber
 
 
 # Vitreal -> scleral. Thicknesses ~ clinical parafoveal norms (µm); the bright/dark
 # alternation (NFL/IPL/OPL/EZ/RPE bright; GCL/INL/ONL dark) is the meaningful part.
+# Contrast widened and the outer complex brightened to match clinical B-scans.
 RETINA_LAYERS: list[RetinaLayer] = [
-    RetinaLayer("NFL", 30.0, 1.38, 4.5e-2, 4.0, "nfl", interface_reflectivity=0.045),
-    RetinaLayer("GCL", 35.0, 1.38, 1.0e-2, 2.0, "inner"),
-    RetinaLayer("IPL", 40.0, 1.38, 3.0e-2, 3.0, "inner"),
-    RetinaLayer("INL", 30.0, 1.38, 9.0e-3, 2.0, "inner"),
-    RetinaLayer("OPL", 25.0, 1.38, 3.2e-2, 3.0, "inner"),
-    RetinaLayer("ONL", 75.0, 1.38, 7.0e-3, 1.8, "onl"),
-    RetinaLayer("ELM", 5.0, 1.38, 3.0e-2, 3.0, "photoreceptor"),
-    RetinaLayer("EZ", 8.0, 1.40, 8.0e-2, 5.0, "photoreceptor"),
-    RetinaLayer("IZ", 8.0, 1.40, 5.0e-2, 4.0, "photoreceptor"),
-    RetinaLayer("RPE", 15.0, 1.40, 9.0e-2, 6.0, "rpe"),
-    RetinaLayer("choroid", 250.0, 1.38, 2.5e-2, 3.0, "choroid"),
+    RetinaLayer("NFL", 30.0, 1.38, 5.5e-2, 4.5, "nfl", interface_reflectivity=0.05),
+    RetinaLayer("GCL", 38.0, 1.38, 6.0e-3, 1.6, "inner"),
+    RetinaLayer("IPL", 40.0, 1.38, 2.8e-2, 3.0, "inner"),
+    RetinaLayer("INL", 30.0, 1.38, 5.0e-3, 1.5, "inner"),
+    RetinaLayer("OPL", 25.0, 1.38, 3.0e-2, 3.0, "inner"),
+    RetinaLayer("ONL", 78.0, 1.38, 3.5e-3, 1.2, "onl"),
+    RetinaLayer("ELM", 5.0, 1.38, 2.5e-2, 3.0, "photoreceptor"),
+    RetinaLayer("EZ", 9.0, 1.41, 1.1e-1, 6.0, "photoreceptor"),
+    RetinaLayer("IZ", 7.0, 1.41, 6.0e-2, 5.0, "photoreceptor"),
+    RetinaLayer("RPE", 18.0, 1.42, 1.3e-1, 8.0, "rpe", water_fraction=0.5, melanin=1.0),
+    RetinaLayer("choroid", 260.0, 1.38, 2.2e-2, 3.0, "choroid", water_fraction=0.6, melanin=0.5),
 ]
 #: total neurosensory retina (NFL..RPE), µm — the flat posterior anchor uses this.
 RETINA_TOTAL_UM = sum(ly.thickness_um for ly in RETINA_LAYERS if ly.group != "choroid")
@@ -86,6 +95,12 @@ def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
     return t * t * (3.0 - 2.0 * t)
 
 
+def _smootherstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
+    """Perlin smootherstep (zero 1st and 2nd derivatives at the edges) — gentler."""
+    t = np.clip((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
 @dataclass
 class RetinaModel:
     """A 3D retinal scene sampled by :meth:`cross_section`."""
@@ -97,18 +112,30 @@ class RetinaModel:
     center_x_um: float = 500.0           # enface x of the fovea / ONH centre
     center_y_um: float = 0.0             # enface y of the centre
     # fovea
-    pit_radius_um: float = 350.0
-    onl_bulge: float = 0.6
+    pit_radius_um: float = 700.0
+    onl_bulge: float = 0.55
     # optic nerve head
     onh_radius_um: float = 850.0
     onh_cup_depth_um: float = 320.0
     vessels: list = field(default_factory=list)
-    curvature_radius_um: float = 12000.0  # gentle global contour
+    curvature_radius_um: float = 22000.0  # gentle global dome (eye curvature)
 
-    def cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
+    def cross_section(self, y_um: float, x_axis_um: np.ndarray,
+                      wavelength_nm: float = REF_WAVELENGTH_NM) -> CrossSection:
         if self.location == "onh":
-            return self._onh_cross_section(y_um, x_axis_um)
-        return self._layered_cross_section(y_um, x_axis_um)
+            return self._onh_cross_section(y_um, x_axis_um, wavelength_nm)
+        return self._layered_cross_section(y_um, x_axis_um, wavelength_nm)
+
+    @staticmethod
+    def _layer_optics(layers, wavelength_nm):
+        """Wavelength-scaled ``(backscatter[], mu_t_per_um[])`` for a layer list."""
+        bs, mut = [], []
+        for ly in layers:
+            m, b = scale_layer(ly.mu_s_per_mm, ly.backscatter, wavelength_nm,
+                               water_fraction=ly.water_fraction, melanin=ly.melanin)
+            bs.append(b)
+            mut.append(m)
+        return np.array(bs), np.array(mut)
 
     def _contour(self, x: np.ndarray) -> np.ndarray:
         xc = x - x.mean()
@@ -135,7 +162,7 @@ class RetinaModel:
                             layer_interface=interface, top_n=self.top_n,
                             features=list(self.vessels), label_names=names)
 
-    def _layered_cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
+    def _layered_cross_section(self, y_um, x_axis_um, wavelength_nm) -> CrossSection:
         x = np.asarray(x_axis_um, float)
         n_x = x.size
         layers = self.layers
@@ -144,10 +171,11 @@ class RetinaModel:
 
         if self.location == "macula":
             r_fov = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
-            ss = _smoothstep(0.0, self.pit_radius_um, r_fov)          # 0 centre -> 1 outside
+            # smootherstep for a gentle, non-peaky parafoveal ridge
+            ss = _smootherstep(0.0, self.pit_radius_um, r_fov)        # 0 centre -> 1 outside
             for i, ly in enumerate(layers):
                 if ly.group == "nfl":
-                    t_phys[i] = base_t[i] * (0.05 + 0.95 * ss)
+                    t_phys[i] = base_t[i] * (0.02 + 0.98 * ss)
                 elif ly.group == "inner":
                     t_phys[i] = base_t[i] * ss
                 elif ly.group == "onl":
@@ -156,14 +184,20 @@ class RetinaModel:
         n_arr = np.array([ly.n for ly in layers])
         base_opt = self.surface_opt_um + float(np.sum(
             [ly.n * ly.thickness_um for ly in layers if ly.group != "choroid"]))
-        return self._assemble(
-            x, t_phys, n_arr, self._contour(x), base_opt,
-            np.array([ly.backscatter for ly in layers]),
-            np.array([ly.mu_s_per_mm * 1e-3 for ly in layers]),
+        bs, mut = self._layer_optics(layers, wavelength_nm)
+        cross = self._assemble(
+            x, t_phys, n_arr, self._contour(x), base_opt, bs, mut,
             [ly.interface_reflectivity for ly in layers],
             [ly.name for ly in layers])
+        # choroidal vascular texture (large lucencies below the RPE)
+        choroid_idx = [i for i, ly in enumerate(layers) if ly.group == "choroid"]
+        if choroid_idx:
+            i = choroid_idx[0]
+            cross.features.append(ChoroidTexture(
+                top_opt=cross.opt_b[i], bot_opt=cross.opt_b[i + 1]))
+        return cross
 
-    def _onh_cross_section(self, y_um: float, x_axis_um: np.ndarray) -> CrossSection:
+    def _onh_cross_section(self, y_um, x_axis_um, wavelength_nm) -> CrossSection:
         """Optic nerve head: outer bands TERMINATE at Bruch's-membrane opening, a
         central cup, RNFL thickening toward the disc, and a medium-reflective
         neural-canal fill (informed by clinical ONH OCT morphology)."""
@@ -178,25 +212,21 @@ class RetinaModel:
         cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.15 * bmo, bmo, r_onh))
 
         # layer stack: insert a neural-canal fill just beneath the NFL/rim.
-        src = {ly.name: ly for ly in RETINA_LAYERS}
+        by_name = {ly.name: ly for ly in RETINA_LAYERS}
+        canal = RetinaLayer("canal", 0.0, 1.38, 2.2e-2, 3.0, "canal")
         order = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL", "ELM", "EZ", "IZ", "RPE", "choroid"]
-        base = {"NFL": src["NFL"].thickness_um, "canal": 0.0,
-                **{k: src[k].thickness_um for k in order if k not in ("NFL", "canal")}}
-        n_map = {**{ly.name: ly.n for ly in RETINA_LAYERS}, "canal": 1.38}
-        bs_map = {**{ly.name: ly.backscatter for ly in RETINA_LAYERS}, "canal": 2.2e-2}
-        mu_map = {**{ly.name: ly.mu_s_per_mm for ly in RETINA_LAYERS}, "canal": 3.0}
-        if_map = {**{ly.name: ly.interface_reflectivity for ly in RETINA_LAYERS}, "canal": None}
+        layers = [canal if name == "canal" else by_name[name] for name in order]
 
         t_phys = np.zeros((len(order), n_x))
         for i, name in enumerate(order):
             if name == "NFL":
-                t_phys[i] = base["NFL"] * (1.0 + 2.2 * rim_ramp)      # rim thickening
+                t_phys[i] = by_name["NFL"].thickness_um * (1.0 + 2.2 * rim_ramp)   # rim thickening
             elif name == "canal":
                 t_phys[i] = 260.0 * (1.0 - term_outer)               # fills the disc
             else:
-                t_phys[i] = base[name] * term_outer                  # terminate at BMO
+                t_phys[i] = by_name[name].thickness_um * term_outer  # terminate at BMO
 
-        n_arr = np.array([n_map[name] for name in order])
+        n_arr = np.array([ly.n for ly in layers])
         # top-down anchor from a cupped ILM (the disc's defining feature is the cup)
         opt_thick = n_arr[:, None] * t_phys
         opt_b = np.zeros((len(order) + 1, n_x))
@@ -207,11 +237,11 @@ class RetinaModel:
         for i in range(len(order)):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
 
+        bs, mut = self._layer_optics(layers, wavelength_nm)
         return CrossSection(
             opt_b=opt_b, phys_b=phys_b, layer_n=n_arr,
-            layer_backscatter=np.array([bs_map[name] for name in order]),
-            layer_mu_t=np.array([mu_map[name] * 1e-3 for name in order]),
-            layer_interface=[if_map[name] for name in order],
+            layer_backscatter=bs, layer_mu_t=mut,
+            layer_interface=[ly.interface_reflectivity for ly in layers],
             top_n=self.top_n, features=list(self.vessels), label_names=list(order))
 
 
@@ -262,8 +292,9 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
         center_y_um=float(rng.uniform(-100, 100)),
-        pit_radius_um=float(rng.uniform(280.0, 450.0)),
-        onl_bulge=float(rng.uniform(0.4, 0.8)),
+        pit_radius_um=float(rng.uniform(550.0, 850.0)),
+        onl_bulge=float(rng.uniform(0.4, 0.7)),
+        curvature_radius_um=float(rng.uniform(16000.0, 30000.0)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
         vessels=vessels)

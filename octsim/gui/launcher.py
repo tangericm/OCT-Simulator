@@ -306,7 +306,7 @@ class Launcher(QWidget):
         extent = [s.x_axis_um[0], s.x_axis_um[-1], s.depth_axis_um[-1], s.depth_axis_um[0]]
         self.fig_bscan.clear()
         ax = self.fig_bscan.figure.add_subplot(111)
-        ax.imshow(s.bscan_db, cmap="gray", aspect="auto", vmin=-55, vmax=0, extent=extent)
+        ax.imshow(s.bscan_db, cmap="gray", aspect="auto", vmin=-42, vmax=0, extent=extent)
         ax.set_title(f"{s.params.get('anatomy', '')}  ({'volume' if s.is_volume else 'B-scan'})")
         ax.set_xlabel("lateral (µm)")
         ax.set_ylabel("optical depth (µm)")
