@@ -155,11 +155,32 @@ class Launcher(QWidget):
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.tabs.addTab(self.fig_bscan, "B-scan")
+        self.tabs.addTab(self._spectrum_tab(), "Spectrum / A-scan")
         self.tabs.addTab(self.fig_label, "Label map")
         self.tabs.addTab(self.fig_motion, "Motion")
         self.tabs.addTab(self.browser, "Volume / batch")
         self.tabs.addTab(self.log, "Log")
         outer.addWidget(self.tabs, 1)
+
+    def _spectrum_tab(self) -> QWidget:
+        """The measured detector interferogram I(k) for one A-scan + its reconstruction.
+
+        Every B-scan column is the FFT reconstruction of exactly this spectrum, so this
+        tab exposes the raw physical signal that produced the image.
+        """
+        container = QWidget()
+        v = QVBoxLayout(container)
+        ctl = QHBoxLayout()
+        ctl.addWidget(QLabel("A-scan column ('center' or index):"))
+        self.spec_col = QLineEdit("center")
+        self.spec_col.setMaximumWidth(120)
+        self.spec_col.editingFinished.connect(self._draw_spectrum)
+        ctl.addWidget(self.spec_col)
+        ctl.addStretch(1)
+        v.addLayout(ctl)
+        self.fig_spectrum = FigurePanel()
+        v.addWidget(self.fig_spectrum, 1)
+        return container
 
     def _section(self, title: str, fields) -> QGroupBox:
         box = QGroupBox(title)
@@ -330,8 +351,47 @@ class Launcher(QWidget):
             axm.set_axis_off()
         self.fig_motion.draw()
 
+        self._draw_spectrum()
+
         if s.is_volume:
             self.browser.set_stack(s.volume_db)
+
+    def _draw_spectrum(self) -> None:
+        """Plot the raw interferogram I(k) of one column and the A-scan it reconstructs to."""
+        s = self.sample
+        self.fig_spectrum.clear()
+        if s is None or s.spectra is None:
+            ax = self.fig_spectrum.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "generate a sample to view its spectrum",
+                    ha="center", va="center")
+            ax.set_axis_off()
+            self.fig_spectrum.draw()
+            return
+        n_x = s.spectra.shape[1]
+        txt = (self.spec_col.text() or "center").strip().lower()
+        col = n_x // 2 if txt in ("center", "centre", "") else int(float(txt))
+        col = int(np.clip(col, 0, n_x - 1))
+
+        k = np.asarray(s.k_axis_rad_per_um)
+        ik = np.asarray(s.spectra[:, col], float)
+        src = s.resolved.source
+        env = src.power_spectrum(k) * (s.resolved.reference_amp ** 2)   # reference pedestal
+
+        fig = self.fig_spectrum.figure
+        ax1 = fig.add_subplot(211)
+        ax1.plot(k, ik, lw=0.6, color="#1f77b4", label="I(k) detected")
+        ax1.plot(k, env, lw=1.2, color="#d62728", alpha=0.7, label="source × reference pedestal")
+        ax1.set_title(f"detector interferogram  I(k) = P(k)·|a_ref + Σ r·e^{{i2kz}}|²   (column {col})")
+        ax1.set_xlabel("wavenumber k (rad/µm)"); ax1.set_ylabel("intensity (a.u.)")
+        ax1.legend(fontsize=8, loc="upper right")
+
+        ax2 = fig.add_subplot(212)
+        ax2.plot(s.depth_axis_um, s.ascan_db(col), lw=0.8, color="#2ca02c")
+        ax2.set_title("reconstructed A-scan  =  FFT of I(k)")
+        ax2.set_xlabel("optical depth (µm)"); ax2.set_ylabel("magnitude (dB)")
+        ax2.set_ylim(-60, 2)
+        fig.tight_layout()
+        self.fig_spectrum.draw()
 
     def _log(self, msg: str) -> None:
         self.log.append(msg)

@@ -37,14 +37,14 @@ fix batches. Update as items land.
 
 | # | area | change | effort/impact |
 |---|------|--------|------|
-| 1 | vessels | anchor depth to local ILM/NFL (`ctx.opt_b`); clamp masks ≥ ILM; large trunks bump the ILM up | med / **high** |
-| 2 | geometry | per-boundary low-freq undulation (RMS few µm, corr len 300–600 µm), partly shared across neighbors | low / **high** |
-| 3 | texture | per-layer low-freq multiplicative mottling under the speckle; NFL striation | low / med |
-| 4 | directionality | RNFL angular `exp(-θ/W)`, Henle angular-sign wedge, EZ/IZ Stiles–Crawford `exp(-ρd²)`, stable RPE, via a `pupil_entry_offset` | med / med |
-| 5 | variation | asymmetric pit (offset centre, skewed walls), global tilt, contour on anatomic centre, correlated per-eye vector | low / med |
+| 1 | vessels | ✅ anchor depth to local ILM/NFL (`ctx.opt_b`); clamp masks ≥ ILM; shadow from posterior wall, caliber-scaled | med / **high** |
+| 2 | geometry | ✅ per-boundary low-freq undulation (RMS few µm, corr len 350–600 µm), partly shared across neighbours (`BoundaryUndulation`) | low / **high** |
+| 3 | texture | ✅ per-layer low-freq multiplicative mottling under the speckle (`texture_contrast`) + specular-interface break-up (`interface_jitter`) | low / med |
+| 4 | directionality | ✅ EZ/IZ Stiles–Crawford `floor+(1-floor)·exp(-(θ/θ0)²)` on local tilt, Henle angular-sign wedge on the ONL (`henle_sign`), stable RPE (`_directional_gain`) | med / med |
+| 5 | variation | ✅ asymmetric pit (skewed walls), global tilt, contour on anatomic centre, per-eye texture/henle/curvature | low / med |
 | 6 | device | default sensitivity roll-off; DC band; stationary fixed-pattern lines; flat noise floor | low / med |
-| 7 | vitreous | faint vitreous backscatter floor + optional posterior-hyaloid membrane | low / low |
-| 8 | vessels | multiple plexus depths, caliber↔depth, shape jitter; FAZ respected | low / low |
+| 7 | vitreous | ✅ faint vitreous backscatter floor (`vitreous_backscatter`); posterior-hyaloid membrane still TODO | low / low |
+| 8 | vessels | multiple plexus depths ✅ (caliber↔depth), shape jitter; FAZ respected ✅ | low / low |
 | 9 | speckle | heavier-tailed (K/gamma) statistics in sparse nuclear layers (INL/ONL) | med / low |
 | — | hybrid | optional SDEdit/CycleGAN refinement keeping the sim's exact labels | high / med |
 
