@@ -106,23 +106,29 @@ def _rasterize_labels(opt_b: np.ndarray, depth_axis_um: np.ndarray) -> np.ndarra
     return labels
 
 
-def _render_frame_reflectivity(scene, resolved: ResolvedConfig, x_axis, y_um, rng):
+def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
+    """Return ``(build(rng)->reflectivity, labels)`` — geometry computed once so
+    incoherent averages redraw only the speckle."""
     depth = resolved.source.depth_axis_um()
     fov = resolved.geometry.lateral_fov_um
     if isinstance(scene, RetinaModel):
-        cross = scene.cross_section(y_um, x_axis)
-        r = build_reflectivity_from_boundaries(
-            cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
-            layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
-            layer_interface=cross.layer_interface, top_n=cross.top_n,
-            depth_axis_um=depth, x_axis_um=x_axis, beam_waist_um=resolved.beam_waist_um,
-            lateral_extent_um=fov, rng=rng, features=cross.features, y_um=y_um)
+        cross = scene.cross_section(y_um, x_axis, resolved.source.center_wavelength_nm)
         labels = _rasterize_labels(cross.opt_b, depth)
+
+        def build(rng):
+            return build_reflectivity_from_boundaries(
+                cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
+                layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
+                layer_interface=cross.layer_interface, top_n=cross.top_n,
+                depth_axis_um=depth, x_axis_um=x_axis, beam_waist_um=resolved.beam_waist_um,
+                lateral_extent_um=fov, rng=rng, features=cross.features, y_um=y_um)
     else:
-        r = build_reflectivity(scene, depth, x_axis, beam_waist_um=resolved.beam_waist_um,
-                               lateral_extent_um=fov, rng=rng)
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
-    return r, labels
+
+        def build(rng):
+            return build_reflectivity(scene, depth, x_axis, beam_waist_um=resolved.beam_waist_um,
+                                      lateral_extent_um=fov, rng=rng)
+    return build, labels
 
 
 # --------------------------------------------------------------------------- simulate
@@ -156,21 +162,32 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     volume = np.empty((n_frames, n_depth, n_x), dtype=np.complex64)
     labels = np.empty((n_frames, n_depth, n_x), dtype=np.uint8)
 
+    navg = max(1, int(resolved.averages))
     for f in range(n_frames):
         y = float(y_axis[f]) if f < y_axis.size else 0.0
-        r, lab = _render_frame_reflectivity(scene, resolved, x_axis, y, rng)
+        build, lab = _frame_reflectivity_builder(scene, resolved, x_axis, y)
+        labels[f] = lab
         if moving:
             dz, _v, phase = motion.frame(f)
             wg = wg_full[f * lines:(f + 1) * lines]
         else:
             dz = phase = wg = None
-        spectra = synthesize_bscan_spectra(
-            r, src, reference_amp=resolved.reference_amp, falloff_6db_um=resolved.falloff_6db_um,
-            dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
-            motion_dz_um=dz, washout_gain=wg, column_phase=phase)
-        spectra = resolved.noise.apply(spectra, rng)
-        volume[f] = reconstruct_bscan(spectra).astype(np.complex64)
-        labels[f] = lab
+
+        def one(rng_):
+            spectra = synthesize_bscan_spectra(
+                build(rng_), src, reference_amp=resolved.reference_amp,
+                falloff_6db_um=resolved.falloff_6db_um,
+                dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
+                motion_dz_um=dz, washout_gain=wg, column_phase=phase)
+            return reconstruct_bscan(resolved.noise.apply(spectra, rng_))
+
+        if navg > 1:  # incoherent (magnitude) averaging — raw speckle reduced, ART-like
+            acc = np.zeros((n_depth, n_x))
+            for _ in range(navg):
+                acc += np.abs(one(rng))
+            volume[f] = (acc / navg).astype(np.complex64)
+        else:
+            volume[f] = one(rng).astype(np.complex64)
 
     peak = np.abs(volume).max() or 1.0
     volume_db = np.clip(20.0 * np.log10(np.maximum(np.abs(volume) / peak, 1e-12)), -60.0, 0.0)

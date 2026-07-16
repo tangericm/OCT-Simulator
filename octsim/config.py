@@ -59,6 +59,7 @@ class ResolvedConfig:
     dispersion_coeffs: list[float]     # derived from the SimConfig.dispersion knob
     falloff_6db_um: float
     noise: NoiseModel
+    averages: int
     motion_level: float
     axial_motion_um: float
     phase_drift_rad: float
@@ -111,6 +112,7 @@ class SimConfig:
     rin: float = 0.005
     read: float = 0.01
     target_snr_db: float = 0.0              # >0 -> back-solve the read floor
+    averages: int = 1                       # incoherent B-scan averages (1 = raw; >1 = ART-like)
 
     # --- motion / artifacts ---
     motion_level: float = 0.0               # 0 -> no motion artifacts
@@ -147,6 +149,7 @@ class SimConfig:
         self.flyback_time_s = max(0.0, float(self.flyback_time_s))
         self.noise_level = max(0.0, float(self.noise_level))
         self.reference_amp = max(1e-6, float(self.reference_amp))
+        self.averages = max(1, int(round(self.averages)))
         self.n_samples = max(1, int(round(self.n_samples)))
         self.seed = int(self.seed)
 
@@ -260,7 +263,8 @@ class SimConfig:
             source=source, geometry=geometry, timing=timing, beam_waist_um=beam_waist,
             reference_amp=self.reference_amp, dispersion_coeffs=disp_coeffs,
             falloff_6db_um=self.falloff_6db_um,
-            noise=noise, motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
+            noise=noise, averages=self.averages,
+            motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
             phase_drift_rad=self.phase_drift_rad, cardiac=self.cardiac,
             microsaccade=self.microsaccade, anatomy=self.anatomy,
             scan_pattern=self.scan_pattern, sample_depth_um=self.sample_depth_um,
