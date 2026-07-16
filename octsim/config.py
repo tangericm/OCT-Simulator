@@ -30,6 +30,9 @@ from .optics import lateral_fwhm_to_waist_um, waist_to_lateral_fwhm_um
 from .source import LightSource
 
 _LN2 = np.log(2.0)
+# Maps the intuitive `dispersion` knob to the quadratic phase coefficient a2
+# (in (rad/µm)^-2). ~1 gives a mild axial stretch, ~3 a strong one.
+DISPERSION_A2_UNIT = 15.0
 SCAN_PATTERNS = ("bscan", "volume")
 ANATOMIES = ("macula", "onh", "periphery", "mirror", "paper", "cornea")
 
@@ -53,8 +56,7 @@ class ResolvedConfig:
     timing: Timing
     beam_waist_um: float
     reference_amp: float
-    dispersion_coeffs: list[float]
-    compensate_dispersion: bool
+    dispersion_coeffs: list[float]     # derived from the SimConfig.dispersion knob
     falloff_6db_um: float
     noise: NoiseModel
     motion_level: float
@@ -95,8 +97,9 @@ class SimConfig:
     flyback_time_s: float = 0.0
 
     # --- dispersion / fall-off ---
-    dispersion_coeffs: list[float] = field(default_factory=list)   # [a2, a3, ...]
-    compensate_dispersion: bool = False
+    # Single intuitive tuning knob: 0 = sharp (transform-limited); increasing
+    # magnitude = more axial stretch/blur; sign flips the chirp direction.
+    dispersion: float = 0.0
     falloff_6db_um: float = 0.0             # 0 -> no roll-off
 
     # --- noise ---
@@ -148,8 +151,7 @@ class SimConfig:
                      "target_snr_db", "motion_level", "axial_motion_um", "phase_drift_rad"):
             setattr(self, name, max(0.0, float(getattr(self, name))))
 
-        self.dispersion_coeffs = [float(c) for c in (self.dispersion_coeffs or [])]
-        self.compensate_dispersion = bool(self.compensate_dispersion)
+        self.dispersion = float(self.dispersion)   # signed tuning knob
         self.noise_free = bool(self.noise_free)
         self.cardiac = bool(self.cardiac)
         self.microsaccade = bool(self.microsaccade)
@@ -245,10 +247,13 @@ class SimConfig:
             "acquisition_time_s": timing.volume_time_s,
         }
 
+        disp_coeffs = [self.dispersion * DISPERSION_A2_UNIT] if self.dispersion else []
+        derived["dispersion"] = self.dispersion
+
         return ResolvedConfig(
             source=source, geometry=geometry, timing=timing, beam_waist_um=beam_waist,
-            reference_amp=self.reference_amp, dispersion_coeffs=list(self.dispersion_coeffs),
-            compensate_dispersion=self.compensate_dispersion, falloff_6db_um=self.falloff_6db_um,
+            reference_amp=self.reference_amp, dispersion_coeffs=disp_coeffs,
+            falloff_6db_um=self.falloff_6db_um,
             noise=noise, motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
             phase_drift_rad=self.phase_drift_rad, cardiac=self.cardiac,
             microsaccade=self.microsaccade, anatomy=self.anatomy,
