@@ -105,6 +105,31 @@ def test_vessel_never_floats_above_ilm():
     assert np.max(np.abs(r[above, col])) < 1e-9, "vessel deposited signal in the vitreous"
 
 
+def test_wide_scan_shows_both_fovea_and_disc():
+    # a wide macula scan reaches the optic disc: the unified field renders both, with the
+    # disc's canal fill present, a cupped ILM, and the outer complex terminating at the BMO.
+    m = RetinaModel(location="macula", center_x_um=3000.0, disc_dx_um=4760.0,
+                    onh_radius_um=850.0, onh_cup_depth_um=320.0, vessels=[])
+    x = np.linspace(0.0, 9000.0, 700)
+    cross = m.cross_section(0.0, x)
+    assert "canal" in cross.label_names                    # disc in view -> unified field
+    disc = int(np.argmin(np.abs(x - (3000.0 + 4760.0))))
+    para = int(np.argmin(np.abs(x - 4500.0)))              # between fovea and disc
+    ilm = cross.opt_b[0]
+    assert ilm[disc] > ilm[para] + 100.0                   # the disc is cupped (deeper)
+    rpe_i = cross.label_names.index("RPE")
+    rpe_thick = cross.opt_b[rpe_i + 1] - cross.opt_b[rpe_i]
+    assert rpe_thick[disc] < 0.3 * rpe_thick[para]         # RPE terminates at the BMO
+
+
+def test_narrow_macula_has_no_disc():
+    # a 6 mm macula scan does not reach the disc -> fast 11-layer path, no canal label
+    m = RetinaModel(location="macula", center_x_um=3000.0, disc_dx_um=4760.0, vessels=[])
+    cross = m.cross_section(0.0, np.linspace(0.0, 6000.0, 300))
+    assert "canal" not in cross.label_names
+    assert len(cross.label_names) == 11
+
+
 def test_onh_shows_central_excavation():
     m = RetinaModel(location="onh", center_x_um=FOV / 2, vessels=[])
     x = np.linspace(0.0, FOV, 256)

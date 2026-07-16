@@ -159,8 +159,11 @@ class RetinaModel:
     pit_radius_um: float = 700.0
     onl_bulge: float = 0.55
     # optic nerve head
-    onh_radius_um: float = 850.0
+    onh_radius_um: float = 850.0          # Bruch's-membrane-opening half-width (~0.85 mm)
     onh_cup_depth_um: float = 320.0
+    disc_dx_um: float = 4760.0            # signed fovea->disc lateral offset (temporal fovea)
+    disc_present: bool = True             # include the disc so it appears at a wide FOV
+    disc_fill_backscatter: float = 2.2e-2  # neural-canal / prelaminar tissue reflectivity
     vessels: list = field(default_factory=list)
     # global curvature: concave-up posterior-pole bowl (center deepest), saturating so
     # a wide scan stays in-window. `curvature_radius_um` sets the near-fovea radius.
@@ -184,20 +187,34 @@ class RetinaModel:
     directional_strength: float = 0.6    # 0 = isotropic; scales SC + Henle effects
     henle_sign: float = 0.0              # -1..1 pupil-offset sign of the HFL asymmetry
 
+    def _landmarks(self):
+        """Return ``(fovea_x, disc_x_or_None)`` for this scene in absolute enface x (µm)."""
+        if self.location == "onh":
+            return self.center_x_um - self.disc_dx_um, self.center_x_um
+        if self.location == "periphery":
+            return self.center_x_um - 6000.0, None      # fovea far off; no disc in view
+        disc_x = self.center_x_um + self.disc_dx_um if self.disc_present else None
+        return self.center_x_um, disc_x
+
     def cross_section(self, y_um: float, x_axis_um: np.ndarray,
                       wavelength_nm: float = REF_WAVELENGTH_NM) -> CrossSection:
-        if self.location == "onh":
-            cross = self._onh_cross_section(y_um, x_axis_um, wavelength_nm)
+        x = np.asarray(x_axis_um, float)
+        fovea_x, disc_x = self._landmarks()
+        # the disc is rendered whenever the scan reaches it (wide FOV) or the scene is
+        # ONH-centred; otherwise the fast 11-layer macula path is used unchanged.
+        disc_in_view = disc_x is not None and x.size and \
+            (x.min() - 1200.0 <= disc_x <= x.max() + 1200.0)
+        if disc_in_view or self.location == "onh":
+            cross = self._field_cross_section(y_um, x, wavelength_nm, fovea_x, disc_x)
+            groups = self._onh_groups(len(cross.label_names))
         else:
-            cross = self._layered_cross_section(y_um, x_axis_um, wavelength_nm)
+            cross = self._layered_cross_section(y_um, x, wavelength_nm)
+            groups = [ly.group for ly in self.layers]
         cross.texture_contrast = self.texture_contrast
         cross.interface_jitter = self.interface_jitter
         cross.vitreous_backscatter = self.vitreous_backscatter
         cross.boundary_sharpness_um = self.boundary_sharpness_um
-        groups = [ly.group for ly in self.layers] if self.location != "onh" \
-            else self._onh_groups(len(cross.label_names))
-        cross.layer_directional = self._directional_gain(
-            cross.opt_b, np.asarray(x_axis_um, float), groups)
+        cross.layer_directional = self._directional_gain(cross.opt_b, x, groups)
         return cross
 
     @staticmethod
@@ -352,53 +369,98 @@ class RetinaModel:
                 contrast=self.choroid_contrast))
         return cross
 
-    def _onh_cross_section(self, y_um, x_axis_um, wavelength_nm) -> CrossSection:
-        """Optic nerve head: outer bands TERMINATE at Bruch's-membrane opening, a
-        central cup, RNFL thickening toward the disc, and a medium-reflective
-        neural-canal fill (informed by clinical ONH OCT morphology)."""
-        x = np.asarray(x_axis_um, float)
+    _FIELD_ORDER = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL",
+                    "ELM", "EZ", "IZ", "RPE", "choroid"]
+
+    def _macula_thickness(self, x, y_um):
+        """Per-layer macular thickness ``{name: [n_x]}`` for the 11 real layers, data-driven
+        (shape model) when available, else the parametric foveal-pit formula."""
         n_x = x.size
-        r_onh = np.sqrt((x - self.center_x_um) ** 2 + (y_um - self.center_y_um) ** 2)
-        bmo = self.onh_radius_um
+        fovea_x, _ = self._landmarks()
+        t = {}
+        if self.data_thickness is not None:
+            ecc = x - fovea_x
+            de = np.asarray(self.data_ecc_um, float)
+            dt = np.asarray(self.data_thickness, float)
+            for i, ly in enumerate(self.layers):
+                t[ly.name] = (np.interp(ecc, de, dt[i]) if i < dt.shape[0]
+                              else np.full(n_x, ly.thickness_um))
+        else:
+            r_fov = np.sqrt((x - fovea_x) ** 2 + (y_um - self.center_y_um) ** 2)
+            side = np.tanh((x - fovea_x) / 150.0)
+            pit_r = self.pit_radius_um * (1.0 + 0.35 * self.pit_asymmetry * side)
+            s = np.clip(r_fov / np.maximum(pit_r, 1e-6), 0.0, 1.0)
+            ss = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
+            for ly in self.layers:
+                base = ly.thickness_um
+                if ly.group == "nfl":
+                    t[ly.name] = base * (0.02 + 0.98 * ss)
+                elif ly.group == "inner":
+                    t[ly.name] = base * ss
+                elif ly.group == "onl":
+                    t[ly.name] = base * (1.0 + self.onl_bulge * (1.0 - ss))
+                else:
+                    t[ly.name] = np.full(n_x, base)
+        return t
 
-        # term_outer: 1 outside the disc, 0 inside — a SHARP termination at the BMO.
-        term_outer = _smoothstep(bmo - 40.0, bmo + 40.0, r_onh)
-        rim_ramp = 1.0 - _smoothstep(bmo, bmo + 280.0, r_onh)         # RNFL thickens toward disc
-        cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.15 * bmo, bmo, r_onh))
+    def _field_cross_section(self, y_um, x, wavelength_nm, fovea_x, disc_x) -> CrossSection:
+        """One retinal field carrying BOTH the (data-driven) macula and a parametric optic
+        disc at their anatomical separation, so a wide scan shows the macula transition into
+        the ONH. Top-down anchored from the ILM with a pit-compensation term that keeps the
+        RPE/BM flat under the fovea; the disc adds a cup, terminates the layers at Bruch's-
+        membrane opening, thickens the RNFL rim, and fills the neural canal.
+        """
+        n_x = x.size
+        order = self._FIELD_ORDER
+        by_name = {ly.name: ly for ly in self.layers}
+        canal = RetinaLayer("canal", 0.0, 1.38, self.disc_fill_backscatter, 3.0, "canal")
+        layers = [canal if nm == "canal" else by_name[nm] for nm in order]
 
-        # layer stack: insert a neural-canal fill just beneath the NFL/rim.
-        by_name = {ly.name: ly for ly in RETINA_LAYERS}
-        canal = RetinaLayer("canal", 0.0, 1.38, 2.2e-2, 3.0, "canal")
-        order = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL", "ELM", "EZ", "IZ", "RPE", "choroid"]
-        layers = [canal if name == "canal" else by_name[name] for name in order]
+        t_mac = self._macula_thickness(x, y_um)          # 11 real layers, pre-disc
+        # parafoveal baseline per neurosensory layer -> the ILM dip (pit) is the thinning
+        # relative to it, so the RPE stays flat where the retina is intact.
+        neuro = [nm for nm in order if nm not in ("canal", "choroid")]
+        pit_depression = np.zeros(n_x)
+        for nm in neuro:
+            base = float(np.max(t_mac[nm]))
+            pit_depression += by_name[nm].n * (base - t_mac[nm])
 
-        t_phys = np.zeros((len(order), n_x))
-        for i, name in enumerate(order):
-            if name == "NFL":
-                t_phys[i] = by_name["NFL"].thickness_um * (1.0 + 2.2 * rim_ramp)   # rim thickening
-            elif name == "canal":
-                t_phys[i] = 260.0 * (1.0 - term_outer)               # fills the disc
-            else:
-                t_phys[i] = by_name[name].thickness_um * term_outer  # terminate at BMO
+        cup = np.zeros(n_x)
+        t_final = {nm: (t_mac[nm].copy() if nm in t_mac else np.zeros(n_x)) for nm in order}
+        t_final["canal"] = np.zeros(n_x)
+        if disc_x is not None:
+            r_disc = np.sqrt((x - disc_x) ** 2 + (y_um - self.center_y_um) ** 2)
+            bmo = self.onh_radius_um
+            term = _smoothstep(bmo - 40.0, bmo + 40.0, r_disc)     # 1 outside, 0 inside
+            rim = 1.0 - _smoothstep(bmo, bmo + 280.0, r_disc)
+            cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.15 * bmo, bmo, r_disc))
+            for nm in neuro:
+                t_final[nm] = t_mac[nm] * term                     # terminate at the BMO
+            t_final["NFL"] = t_mac["NFL"] * (1.0 + 2.2 * rim) * term  # rim thickening
+            t_final["canal"] = 260.0 * (1.0 - term)                # neural-canal fill
+            t_final["choroid"] = t_mac.get("choroid", np.full(n_x, by_name["choroid"].thickness_um))
 
         n_arr = np.array([ly.n for ly in layers])
-        # top-down anchor from a cupped ILM (the disc's defining feature is the cup)
-        opt_thick = n_arr[:, None] * t_phys
+        t_phys = np.array([t_final[nm] for nm in order])
         opt_b = np.zeros((len(order) + 1, n_x))
-        opt_b[0] = self.surface_opt_um + cup + self._contour(x)
+        opt_b[0] = self.surface_opt_um + self._contour(x) + pit_depression + cup
         for i in range(len(order)):
-            opt_b[i + 1] = opt_b[i] + opt_thick[i]
+            opt_b[i + 1] = opt_b[i] + n_arr[i] * t_phys[i]
         self._undulate(opt_b, x, y_um)
         phys_b = np.zeros((len(order) + 1, n_x))
         for i in range(len(order)):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
 
         bs, mut = self._layer_optics(layers, wavelength_nm)
-        return CrossSection(
+        cross = CrossSection(
             opt_b=opt_b, phys_b=phys_b, layer_n=n_arr,
             layer_backscatter=bs, layer_mu_t=mut,
             layer_interface=[ly.interface_reflectivity for ly in layers],
             top_n=self.top_n, features=list(self.vessels), label_names=list(order))
+        ci = order.index("choroid")
+        cross.features.append(ChoroidTexture(
+            top_opt=cross.opt_b[ci], bot_opt=cross.opt_b[ci + 1], contrast=self.choroid_contrast))
+        return cross
 
 
 # --------------------------------------------------------------------------- builders
@@ -461,6 +523,7 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         choroid_contrast=float(rng.uniform(0.45, 0.62)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
+        disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
         tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
         pit_asymmetry=float(rng.uniform(-0.5, 0.5)),
         undulation=undulation,
