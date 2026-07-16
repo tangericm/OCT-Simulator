@@ -39,6 +39,31 @@ def test_volume_has_contiguous_frames_and_slow_axis():
     assert np.allclose(pitch, 700.0 / 7, rtol=1e-6)
 
 
+def test_volume_anatomy_recedes_across_frames():
+    # the foveal pit is deepest near the central frame and recedes toward the slow-axis edges
+    cfg = _cfg(anatomy="macula", scan_pattern="volume", n_frames=9, slow_fov_um=2000.0,
+               lateral_fov_um=6000.0)
+    res = simulate(cfg, seed=6)
+    lab = res.label_map                                   # [F, nz, nx]
+    cen = lab.shape[2] // 2
+    inner = np.isin(lab, [1, 2, 3, 4, 5]).sum(axis=1)[:, cen]   # inner-retina px at centre/frame
+    assert inner.argmin() in range(3, 6)                 # thinnest (pit) in the middle frames
+    assert inner[0] > inner.min() + 5                    # thicker (parafoveal) at both edges
+    assert inner[-1] > inner.min() + 5
+
+
+def test_coherent_texture_field_is_smooth_in_y():
+    # the volume-coherent texture field decorrelates with slow-axis distance (no flicker)
+    from octsim.sample import CoherentField
+    f = CoherentField(np.random.default_rng(0), corr_y_um=420.0, contrast=0.3)
+    z = np.linspace(0.0, 300.0, 80); x = np.linspace(0.0, 6000.0, 200)
+    g0, g_near, g_far = f.sample(z, x, 0.0), f.sample(z, x, 60.0), f.sample(z, x, 300.0)
+    cc = lambda a, b: float((lambda u, v: (u @ v) / (np.linalg.norm(u) * np.linalg.norm(v) + 1e-12))(
+        a.ravel() - a.mean(), b.ravel() - b.mean()))
+    assert cc(g0, g_near) > 0.75                          # adjacent frames stay correlated (no flicker)
+    assert cc(g0, g_near) > cc(g0, g_far)                 # decorrelates with slow-axis distance
+
+
 def test_volume_motion_is_correlated_across_frames():
     cfg = _cfg(anatomy="macula", scan_pattern="volume", n_frames=10, slow_fov_um=600.0,
                motion_level=1.0, axial_motion_um=3.0, microsaccade=False)

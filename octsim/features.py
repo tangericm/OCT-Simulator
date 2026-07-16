@@ -96,6 +96,7 @@ class ChoroidTexture:
     bot_opt: np.ndarray          # [n_x] optical depth of the choroid bottom
     blob_um: float = 180.0       # characteristic vessel size
     contrast: float = 0.55       # depth of the lucencies (0..1)
+    field: object = None         # optional CoherentField -> volume-coherent choroid pattern
 
     def apply(self, r: np.ndarray, ctx) -> None:
         depth = ctx.depth_axis_um
@@ -107,19 +108,23 @@ class ChoroidTexture:
             return
         dz = ctx.dz
         dx = (x[1] - x[0]) if n_x > 1 else 1.0
-        # confine the (expensive) smoothing to the choroid band rows; the full-height
-        # noise is still drawn so the RNG stream — and everything downstream — is stable.
         r0 = max(0, int(np.floor(self.top_opt.min() / dz)))
         r1 = min(n_depth, int(np.ceil(self.bot_opt.max() / dz)) + 1)
-        field = ctx.rng.standard_normal((n_depth, n_x))
-        sub = field[r0:r1]
-        try:
-            from scipy.ndimage import gaussian_filter
-            sub = gaussian_filter(sub, (max(self.blob_um / dz, 1.0),
-                                        max(self.blob_um / dx, 1.0)))
-        except Exception:
-            pass
-        sub = (sub - sub.mean()) / (sub.std() + 1e-9)
         gain = np.ones((n_depth, n_x))
-        gain[r0:r1] = 1.0 + self.contrast * np.clip(sub, -1.5, 1.5)
+        if self.field is not None:
+            # volume-coherent: the choroidal vascular pattern is a fixed 3-D structure sampled
+            # at this frame's slow position, so it evolves smoothly across a volume.
+            gain[r0:r1] = self.field.sample(depth[r0:r1], x, ctx.y_um)
+        else:
+            # confine the (expensive) smoothing to the choroid band; full-height noise is still
+            # drawn so the per-frame RNG stream is stable.
+            sub = ctx.rng.standard_normal((n_depth, n_x))[r0:r1]
+            try:
+                from scipy.ndimage import gaussian_filter
+                sub = gaussian_filter(sub, (max(self.blob_um / dz, 1.0),
+                                            max(self.blob_um / dx, 1.0)))
+            except Exception:
+                pass
+            sub = (sub - sub.mean()) / (sub.std() + 1e-9)
+            gain[r0:r1] = 1.0 + self.contrast * np.clip(sub, -1.5, 1.5)
         r[band] *= gain[band]
