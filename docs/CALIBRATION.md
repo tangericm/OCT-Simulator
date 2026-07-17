@@ -157,6 +157,42 @@ validates layer *ordering* and *shape* but its compressed ratios are not raw lin
 the speckle/heterogeneity/thickness/curvature numbers are directly comparable. Pool more with
 `pool_textures([...])` — point `scripts/fit_texture.py` at Kermany OCT2017 NORMAL, OCTID, etc.
 
+## Volumetric validation: OCTA-500 (real 3D macular cubes)
+
+Every dataset above is a pile of independent 2D B-scans. [OCTA-500](https://ieee-dataport.org/open-access/octa-500)
+(Li et al., *Medical Image Analysis* 2024) is the first **volumetric** reference — dense,
+fovea-centred 3 mm cubes (304 B-scans × 304 A-lines × 640 px, Optovue RTVue-XR) **with a 3D
+layer segmentation** (`GT_Layers[6, x, y]` en-face height maps) and en-face FAZ / vessel masks.
+`octsim/data/octa500.py` distils the OCTA_3mm subset; `scripts/fit_octa500.py` reproduces the
+two bundled artifacts (the ~4.5 GB raw is never committed).
+
+**Normal-eye filter.** OCTA_3mm is ~80 % normal / 20 % disease (AMD, DR, CNV) and the partial
+release used here ships no per-subject disease sheet, so pathology is flagged straight from the
+segmented geometry (`is_normal_geometry`): edema/CNV thicken the fovea and obliterate or invert
+the pit, drusen roughen the outer boundary. On the 100-eye sample this excludes 10 eyes; the
+kept 90 are tight and healthy (foveal 216 ± 18 µm, pit −8.7 ± 2.4 µm).
+
+**What it validated.** The measured normal macula (`octsim.data.octa500.bundled_macula()`,
+stored in `octa500_macula.json`) confirms: the posterior pole is **100 % concave-up** (the
+strongest confirmation yet of the bowl curvature); a normal **FAZ radius ~324 µm** (median area
+0.33 mm²), now the simulator's `retina.FAZ_RADIUS_UM` avascular-zone constant (was a hand-picked
+250 µm); and a perifoveal plateau ~338 µm, consistent with the physics-model thickness.
+
+**What it flagged (open calibration).** OCTA-500's dense-volume fovea has a **deep pit** —
+central 212 µm vs a 338 µm plateau, **relative depth 0.63**. The current default geometry (the
+JHU shape model) reproduces a **shallower** pit (rel-depth ~0.86): the 49-B-scan JHU volumes are
+imperfectly foveal-centred, so their *mean* fovea is parafovea-diluted (its own fitted mean is
+central 250 / plateau 282 µm). OCTA-500 is the better foveal reference; `test_octa500.py` pins
+this gap so a future foveal recalibration (refit the pit from OCTA-500's volumetric segmentation)
+moves it the right way. This is a deliberate, surfaced decision — the default geometry is left
+unchanged pending that refit.
+
+**Appearance.** The RTVue-XR *structural* B-scan is the average of the repeated OCTA acquisitions,
+so its speckle contrast is **0.34** (≈2.3 effective frames) — a genuinely different, frame-averaged
+regime. It is bundled by name (`bundled_texture("octa500")`) but **kept out of the single-frame
+healthy default** (which stays at ~0.49, the fully-developed-speckle value); the drop is itself a
+cross-check of the averaging model (0.52/0.34 ≈ √2.3).
+
 ## Field of view and the optic nerve head
 
 The healthy-eye shape model is fit out to **±2.6 mm eccentricity** (using the full width of each
@@ -182,8 +218,12 @@ calibrate the disc dimensions.
 
 - **Done:** per-layer optics + curvature + boundary sharpness from data; a PCA shape model that
   samples real foveal-pit / thickness geometry from a **healthy-eye** dataset (default, ±2.6 mm)
-  or a DME one; a unified fovea+disc field so the ONH appears at wide FOV; all wired into the
-  config/GUI with a parametric opt-out.
-- **Next:** a foveal-vs-parafoveal sampling knob (bias the mode-1 latent); learn the global
-  curvature + ONL bulge as modes; calibrate the disc from local ONH segmentations; extract
-  linear-domain optics from Maestro `.raw` reconstructions.
+  or a DME one; a unified fovea+disc field so the ONH appears at wide FOV; a multi-device texture
+  prior + separate disease profiles; and a **volumetric** OCTA-500 reference (real 3D macular
+  cubes) that validated the concave bowl, set the FAZ radius, and pinned the foveal-pit depth;
+  all wired into the config/GUI with a parametric opt-out.
+- **Next (highest-value):** **deepen the default foveal pit** — refit the macular geometry from
+  OCTA-500's volumetric segmentation (rel-depth 0.63 vs the current JHU-diluted 0.86), splitting
+  its ILM→BM total by the canonical 11-layer ratios so only surfaces we're confident about drive
+  it. Then: a foveal-vs-parafoveal sampling knob; learn the global curvature + ONL bulge as modes;
+  calibrate the disc from local ONH segmentations; linear-domain optics from Maestro `.raw`.

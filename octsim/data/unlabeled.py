@@ -70,10 +70,13 @@ class TextureProfile:
 #: retinopathy / drusen — pooled OCT-C8 + OCTID where both cover the class) are kept too. The
 #: disease profiles carry realistic texture but distorted geometry, so they are NOT in the
 #: healthy default (use them explicitly to flavour degraded/pathological corpora).
+#: ``octa500`` is a NORMAL profile but stays separate: its RTVue-XR structural B-scans are
+#: frame-AVERAGED (speckle contrast ~0.34, about 2.3 effective frames), a different acquisition
+#: regime from the single-frame (~0.5) datasets that make up the default pool.
 _BUNDLED_TEXTURE = {"default": "texture_pooled.json", "normal": "texture_pooled.json",
                     "pooled": "texture_pooled.json", "srinivasan": "texture_srinivasan.json",
                     "octdl": "texture_octdl.json", "octid": "texture_octid_normal.json",
-                    "octc8": "texture_octc8.json",
+                    "octc8": "texture_octc8.json", "octa500": "texture_octa500.json",
                     "mh": "texture_mh.json", "csr": "texture_csr.json",
                     "amd": "texture_amd.json", "dr": "texture_dr.json",
                     "cnv": "texture_cnv.json", "dme": "texture_dme.json",

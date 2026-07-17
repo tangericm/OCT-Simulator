@@ -55,6 +55,11 @@ class RetinaLayer:
     melanin: float = 0.0         # pigment (RPE/choroid) — strong NIR absorber
 
 
+# Foveal avascular zone radius: the central capillary-free region that superficial vessels
+# ring but do not cross. OCTA-500 normal 3mm eyes measure a median FAZ area ~0.33 mm²
+# (equivalent radius ~324 µm; octsim/data/octa500_macula.json).
+FAZ_RADIUS_UM = 320.0
+
 # Vitreal -> scleral. Thicknesses ~ clinical parafoveal norms (µm); the bright/dark
 # alternation (NFL/IPL/OPL/EZ/RPE bright; GCL/INL/ONL dark) is the meaningful part.
 # Contrast widened and the outer complex brightened to match clinical B-scans.
@@ -521,8 +526,9 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
     vessels = []
     for _ in range(n_vessels):
         vx = float(rng.uniform(0.1, 0.9)) * lateral_fov_um
-        if location == "macula" and abs(vx - center_x) < 250.0:
-            vx += 300.0 * np.sign(vx - center_x + 1e-9)   # keep the fovea avascular (FAZ)
+        if location == "macula" and abs(vx - center_x) < FAZ_RADIUS_UM:
+            # ring the fovea rather than cross it: land just outside the avascular zone
+            vx = center_x + np.sign(vx - center_x + 1e-9) * (FAZ_RADIUS_UM + float(rng.uniform(10.0, 90.0)))
         cal = float(rng.uniform(30.0, 120.0))
         # large trunks ride the superficial plexus; small vessels can sit deeper
         plexus = 0.0 if cal > 80.0 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))
