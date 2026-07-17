@@ -50,15 +50,28 @@ def test_speckle_contrast_is_rayleigh_ish():
 
 def test_bundled_texture_loads_and_is_sane():
     prof = ul.bundled_texture()                  # pooled multi-dataset NORMAL prior
-    assert prof.n_images > 1500                  # Srinivasan + OCTDL pooled
+    assert prof.n_images > 1900                  # Srinivasan + OCTDL + OCTID-normal + OCT-C8-normal
     assert "pooled" in prof.source
     assert 200.0 < prof.total_retina_um_mean < 420.0    # normal retinal thickness
     assert prof.curvature_concave_frac > 0.6            # real retina images concave-up
     assert 0.4 < prof.speckle_contrast < 0.75
     assert len(prof.reflectivity_template) == ul.N_TEMPLATE
-    # the single-dataset profiles are still available
+    # single normal datasets are available
     assert ul.bundled_texture("srinivasan").n_images > 1000
-    assert ul.bundled_texture("octdl").n_images > 200
+    assert ul.bundled_texture("octid").n_images > 150
+    assert ul.bundled_texture("octc8").n_images > 1000
+
+
+def test_disease_texture_profiles_bundled_separately():
+    # OCTID + OCT-C8 disease categories carry realistic texture but distorted geometry -> kept
+    # OUT of the healthy default, available by name to flavour degraded/pathological corpora.
+    for name in ("mh", "csr", "amd", "dr", "cnv", "dme", "drusen"):
+        p = ul.bundled_texture(name)
+        assert p.n_images > 40
+        assert 0.35 < p.speckle_contrast < 0.75         # speckle still Rayleigh-ish in disease
+    # classes covered by BOTH datasets are pooled (OCT-C8 + OCTID)
+    assert "OCTID" in ul.bundled_texture("dr").source
+    assert "OCT-C8" in ul.bundled_texture("dme").source
 
 
 def test_pool_textures_weights_by_count():

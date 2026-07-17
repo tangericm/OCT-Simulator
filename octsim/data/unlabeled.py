@@ -64,11 +64,20 @@ class TextureProfile:
             return cls(**json.load(fh))
 
 
-#: bundled texture profiles fitted on public unlabeled NORMAL datasets. The default is the
-#: multi-dataset pool (Srinivasan + OCTDL); the single-dataset profiles are kept too.
+#: bundled texture profiles fitted on public unlabeled datasets. The default is the healthy
+#: multi-dataset pool (Srinivasan + OCTDL + OCTID-normal + OCT-C8-normal); the single normal
+#: datasets and the DISEASE categories (macular hole / CSR / AMD / CNV / DME / diabetic
+#: retinopathy / drusen — pooled OCT-C8 + OCTID where both cover the class) are kept too. The
+#: disease profiles carry realistic texture but distorted geometry, so they are NOT in the
+#: healthy default (use them explicitly to flavour degraded/pathological corpora).
 _BUNDLED_TEXTURE = {"default": "texture_pooled.json", "normal": "texture_pooled.json",
                     "pooled": "texture_pooled.json", "srinivasan": "texture_srinivasan.json",
-                    "octdl": "texture_octdl.json"}
+                    "octdl": "texture_octdl.json", "octid": "texture_octid_normal.json",
+                    "octc8": "texture_octc8.json",
+                    "mh": "texture_mh.json", "csr": "texture_csr.json",
+                    "amd": "texture_amd.json", "dr": "texture_dr.json",
+                    "cnv": "texture_cnv.json", "dme": "texture_dme.json",
+                    "drusen": "texture_drusen.json"}
 
 
 def bundled_texture(name: str = "default") -> TextureProfile:

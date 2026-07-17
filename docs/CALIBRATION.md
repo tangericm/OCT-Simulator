@@ -131,12 +131,21 @@ prof = bundled_texture()                                     # Srinivasan-2014 N
 python scripts/fit_texture.py --root path/to/NORMAL --out octsim/data/texture_srinivasan.json
 ```
 
-The bundled default (`bundled_texture()`) is a **pooled multi-dataset prior** — 1739 NORMAL
-B-scans across **two devices**: [Srinivasan-2014](http://www.duke.edu/~sf59/Srinivasan_BOE_2014_dataset.htm)
-(Spectralis, 1407) + [OCTDL](https://zenodo.org/records/10839556) (Optovue NO class, 332),
-combined with `pool_textures()` (weighted by B-scan count; `bundled_texture("srinivasan")` /
-`"octdl"` load the singles). Both devices show the same band structure (NFL peak → ONL dip →
-RPE peak); the pool averages their display/contrast differences.
+The bundled default (`bundled_texture()`) is a **pooled multi-dataset prior** — ~4900 NORMAL
+B-scans across **four datasets / multiple devices**:
+[Srinivasan-2014](http://www.duke.edu/~sf59/Srinivasan_BOE_2014_dataset.htm) (Spectralis, 1407),
+[OCTDL](https://zenodo.org/records/10839556) (Optovue, 332), [OCTID](https://borealisdata.ca)
+(206), and OCT-C8 / RetinalOCT (3000) — combined with `pool_textures()` (weighted by B-scan
+count; `bundled_texture("srinivasan"|"octdl"|"octid")` load the singles). They all show the same
+band structure (NFL peak → ONL dip → RPE peak); the pool averages device/display differences.
+
+**Disease texture is kept separate.** OCTID and OCT-C8 disease categories (macular hole, CSR,
+AMD, CNV, DME, DR, drusen) carry realistic speckle/heterogeneity but *distorted geometry* (fluid,
+atrophy, edema), so they are **excluded from the healthy default** and bundled by name
+(`bundled_texture("dr"|"amd"|"mh"|"csr"|"cnv"|"dme"|"drusen")`) for deliberately generating
+degraded / pathological-looking corpora. Across all of them the measured speckle contrast stays
+~0.45–0.53 (Rayleigh) and the curvature stays predominantly concave — an independent, broad
+cross-device validation of the physics.
 
 This **validated the physics model**: measured speckle contrast **0.51** (≈ the fully-developed-
 speckle Rayleigh value 0.52), **82 % of scans concave-up** (95 % in OCTDL alone — confirming the
