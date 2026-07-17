@@ -162,7 +162,7 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
         cross = scene.cross_section(y_um, x_axis, resolved.source.center_wavelength_nm)
         labels = _rasterize_labels(cross.opt_b, depth)
 
-        def build(rng):
+        def build(rng, speckle=None):
             return build_reflectivity_from_boundaries(
                 cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
                 layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
@@ -174,11 +174,11 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 vitreous_backscatter=cross.vitreous_backscatter,
                 layer_directional=cross.layer_directional,
                 boundary_sharpness_um=cross.boundary_sharpness_um,
-                texture_field=cross.texture_field)
+                texture_field=cross.texture_field, speckle=speckle)
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
 
-        def build(rng):
+        def build(rng, speckle=None):
             return build_reflectivity(scene, depth, x_axis, beam_waist_um=resolved.beam_waist_um,
                                       lateral_extent_um=fov, rng=rng)
     return build, labels
@@ -216,6 +216,19 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     labels = np.empty((n_frames, n_depth, n_x), dtype=np.uint8)
 
     navg = max(1, int(resolved.averages))
+    # slow-axis speckle correlation: OCT speckle decorrelates over ~ the lateral resolution
+    # (the beam waist) in the slow direction too, so a densely-sampled volume shares speckle
+    # between adjacent frames instead of boiling. AR(1) carry with correlation length = the beam
+    # waist reproduces that (alpha->1 when the slow pitch << the waist, ->0 when it is coarse).
+    slow_pitch = float(y_axis[1] - y_axis[0]) if y_axis.size > 1 else 0.0
+    waist = max(float(resolved.beam_waist_um), 1e-6)
+    speckle_alpha = float(np.exp(-slow_pitch / waist)) if (n_frames > 1 and slow_pitch > 0) else 0.0
+    prev_g = None
+
+    def _draw_speckle(rng_):
+        return (rng_.standard_normal((n_depth, n_x))
+                + 1j * rng_.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+
     first_spectra = None
     for f in range(n_frames):
         y = float(y_axis[f]) if f < y_axis.size else 0.0
@@ -227,9 +240,18 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
         else:
             dz = phase = wg = None
 
-        def one(rng_):
+        # this frame's slow-axis-correlated base speckle (None => builder draws its own)
+        if speckle_alpha > 0.0:
+            fresh = _draw_speckle(rng)
+            g0 = fresh if prev_g is None else (
+                speckle_alpha * prev_g + np.sqrt(1.0 - speckle_alpha ** 2) * fresh)
+            prev_g = g0
+        else:
+            g0 = None
+
+        def one(rng_, speckle):
             spectra = synthesize_bscan_spectra(
-                build(rng_), src, reference_amp=resolved.reference_amp,
+                build(rng_, speckle), src, reference_amp=resolved.reference_amp,
                 falloff_6db_um=resolved.falloff_6db_um,
                 dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
                 motion_dz_um=dz, washout_gain=wg, column_phase=phase)
@@ -239,13 +261,14 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
         if navg > 1:  # incoherent (magnitude) averaging — raw speckle reduced, ART-like
             acc = np.zeros((n_depth, n_x))
             for a in range(navg):
-                recon, noisy = one(rng)
+                # keep the frame's coherent base for the first average; redraw the rest
+                recon, noisy = one(rng, g0 if a == 0 else None)
                 acc += np.abs(recon)
                 if f == 0 and a == 0:
                     first_spectra = noisy
             volume[f] = (acc / navg).astype(np.complex64)
         else:
-            recon, noisy = one(rng)
+            recon, noisy = one(rng, g0)
             volume[f] = recon.astype(np.complex64)
             if f == 0:
                 first_spectra = noisy

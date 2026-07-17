@@ -60,6 +60,35 @@ class RetinaLayer:
 # (equivalent radius ~324 µm; octsim/data/octa500_macula.json).
 FAZ_RADIUS_UM = 320.0
 
+
+def random_macular_vessels(rng, *, center_x_um: float, lateral_fov_um: float,
+                           location: str = "macula") -> list:
+    """Draw a physiological set of retinal vessels for a scene (shared by both the
+    parametric and shape-model retina builders — one place so the FAZ and shadow tuning
+    can't drift between them).
+
+    Calibrated to **frame-averaged clinical B-scans** (OCTA-500 etc.): superficial vessels
+    ring the foveal avascular zone and cast only a *subtle* posterior shadow — the large dark
+    lumina / heavy shadows of a single-frame render are barely visible in acquired data, so
+    the caliber and shadow depth are kept modest.
+    """
+    from ..features import BloodVessel
+    vessels = []
+    for _ in range(int(rng.integers(2, 6))):
+        vx = float(rng.uniform(0.08, 0.92)) * lateral_fov_um
+        if location == "macula" and abs(vx - center_x_um) < FAZ_RADIUS_UM:
+            # ring the fovea rather than cross it: land just outside the avascular zone
+            vx = center_x_um + np.sign(vx - center_x_um + 1e-9) * (
+                FAZ_RADIUS_UM + float(rng.uniform(10.0, 90.0)))
+        cal = float(rng.uniform(25.0, 95.0))          # fewer huge trunks -> less blobby
+        plexus = 0.0 if cal > 75.0 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))
+        vessels.append(BloodVessel(
+            x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=cal,
+            plexus_offset_um=plexus + float(rng.uniform(0.0, 8.0)),
+            slope=float(rng.uniform(-0.4, 0.4)),
+            shadow_od=float(rng.uniform(0.25, 0.6))))  # subtle shadow (averaged-data look)
+    return vessels
+
 # Vitreal -> scleral. Thicknesses ~ clinical parafoveal norms (µm); the bright/dark
 # alternation (NFL/IPL/OPL/EZ/RPE bright; GCL/INL/ONL dark) is the meaningful part.
 # Contrast widened and the outer complex brightened to match clinical B-scans.
@@ -176,8 +205,8 @@ class RetinaModel:
     curvature_radius_um: float = 37500.0
     curvature_sag_um: float = 520.0       # max peripheral rise of the bowl
     curvature_concave: bool = True        # True = bowl (real posterior pole); False = legacy dome
-    boundary_sharpness_um: float = 5.0    # axial reflectivity-transition width (softens bands)
-    choroid_contrast: float = 0.55        # choroidal vascular lucency depth
+    boundary_sharpness_um: float = 8.0    # axial reflectivity-transition width (softens bands)
+    choroid_contrast: float = 0.32        # choroidal vascular lucency depth (subtle, averaged look)
     tilt_um_per_mm: float = 0.0           # global B-scan tilt (per-eye)
     pit_asymmetry: float = 0.0            # -1..1 skew of the two foveal walls
     undulation: object = None            # BoundaryUndulation | None
@@ -522,27 +551,14 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
                               backscatter=ly.backscatter * float(rng.uniform(0.8, 1.2))))
     center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-80, 80))
 
-    n_vessels = int(rng.integers(2, 6))
-    vessels = []
-    for _ in range(n_vessels):
-        vx = float(rng.uniform(0.1, 0.9)) * lateral_fov_um
-        if location == "macula" and abs(vx - center_x) < FAZ_RADIUS_UM:
-            # ring the fovea rather than cross it: land just outside the avascular zone
-            vx = center_x + np.sign(vx - center_x + 1e-9) * (FAZ_RADIUS_UM + float(rng.uniform(10.0, 90.0)))
-        cal = float(rng.uniform(30.0, 120.0))
-        # large trunks ride the superficial plexus; small vessels can sit deeper
-        plexus = 0.0 if cal > 80.0 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))
-        vessels.append(BloodVessel(
-            x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=cal,
-            plexus_offset_um=plexus + float(rng.uniform(0.0, 8.0)),
-            slope=float(rng.uniform(-0.4, 0.4)),
-            shadow_od=float(rng.uniform(0.7, 1.5))))
+    vessels = random_macular_vessels(rng, center_x_um=center_x,
+                                     lateral_fov_um=lateral_fov_um, location=location)
 
     undulation = BoundaryUndulation.make(
         len(RETINA_LAYERS) + 2, rng,
         amp_um=float(rng.uniform(2.0, 6.0)), corr_um=float(rng.uniform(350.0, 600.0)))
     texture_contrast = float(rng.uniform(0.16, 0.30))
-    choroid_contrast = float(rng.uniform(0.45, 0.62))
+    choroid_contrast = float(rng.uniform(0.22, 0.36))     # subtle choroidal lucencies (averaged look)
     mottle_field, choroid_field = _texture_fields(rng, texture_contrast, choroid_contrast)
 
     return RetinaModel(
@@ -552,7 +568,7 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         onl_bulge=float(rng.uniform(0.4, 0.7)),
         curvature_radius_um=float(rng.uniform(30000.0, 48000.0)),
         curvature_sag_um=float(rng.uniform(420.0, 640.0)),
-        boundary_sharpness_um=float(rng.uniform(4.0, 7.0)),
+        boundary_sharpness_um=float(rng.uniform(7.0, 11.0)),   # softer inter-layer transitions
         choroid_contrast=choroid_contrast,
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),

@@ -140,6 +140,7 @@ def build_reflectivity_from_boundaries(
     layer_directional: np.ndarray | None = None,
     boundary_sharpness_um: float = 0.0,
     texture_field: "CoherentField | None" = None,
+    speckle: np.ndarray | None = None,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -228,8 +229,14 @@ def build_reflectivity_from_boundaries(
             except Exception:
                 pass
 
-    g = (rng.standard_normal((n_depth, n_x))
-         + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+    # unit circular-complex-Gaussian speckle. For a volume the caller passes a field that is
+    # CORRELATED across the slow axis (``speckle``), so adjacent frames share speckle instead of
+    # boiling; a fresh draw (default) is the independent single-frame case.
+    if speckle is not None:
+        g = speckle
+    else:
+        g = (rng.standard_normal((n_depth, n_x))
+             + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
     r += g * backscatter_map
 
     if features:
