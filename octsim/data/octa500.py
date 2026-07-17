@@ -244,6 +244,94 @@ def bundled_macula() -> MaculaProfile:
     return MaculaProfile.load(os.path.join(os.path.dirname(__file__), "octa500_macula.json"))
 
 
+# --- fit a normal-eye shape model from the volumetric segmentation --------------------
+# OCTA-500's 6 surfaces are not confidently named histologically, but the OPL/ONL divide is
+# unambiguous from foveal PHYSIOLOGY: surface 2 is the boundary where the INNER compartment
+# (ILM→S2) collapses at the fovea (190→30 µm) while the OUTER compartment (S2→BM) *bulges*
+# (150→189 µm, the photoreceptor/ONL foveal bulge). So we split the real ILM→BM into those two
+# compartments and sub-divide each by the simulator's canonical parafoveal ratios into the JHU
+# 8-layer scheme — which the existing ``calibration._layer_split_map`` maps straight onto the
+# 11 sim layers. Total thickness and pit depth come from OCTA-500; sub-layer proportions are
+# canonical (the same approximation already used for the merged Duke/JHU layers).
+DIVIDE_SURFACE = 2
+#: JHU-scheme layers, inner (ILM→OPL) then outer (ONL→RPE), so the fit reuses the JHU split map.
+SHAPE_LAYERS = ["RNFL", "GCIP", "INL", "OPL", "ONL", "IS", "OS", "RPE"]
+_INNER = ["RNFL", "GCIP", "INL", "OPL"]
+_OUTER = ["ONL", "IS", "OS", "RPE"]
+
+
+def _canonical_ratios():
+    """Proportion of each JHU layer within its compartment, from the sim's canonical table."""
+    from ..anatomy.retina import RETINA_LAYERS
+    t = {ly.name: ly.thickness_um for ly in RETINA_LAYERS}
+    comp = {"RNFL": t["NFL"], "GCIP": t["GCL"] + t["IPL"], "INL": t["INL"], "OPL": t["OPL"],
+            "ONL": t["ONL"], "IS": t["ELM"] + t["EZ"], "OS": t["IZ"], "RPE": t["RPE"]}
+    inner_tot = sum(comp[k] for k in _INNER); outer_tot = sum(comp[k] for k in _OUTER)
+    return ({k: comp[k] / inner_tot for k in _INNER},
+            {k: comp[k] / outer_tot for k in _OUTER})
+
+
+def _radial_compartments(L, n_r, r_max_um):
+    """Radial-average the inner (ILM→S2) and outer (S2→BM) thickness (µm) of one eye."""
+    ny, nx = L.shape[1:]
+    fx, fy = geometry_metrics(L)["fovea_xy"]
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    r = np.hypot(xx - fx, yy - fy) * LATERAL_PITCH_UM
+    inner = (L[DIVIDE_SURFACE] - L[0]) * AXIAL_PITCH_UM
+    outer = (L[5] - L[DIVIDE_SURFACE]) * AXIAL_PITCH_UM
+    edges = np.linspace(0.0, r_max_um, n_r + 1)
+    ri = np.full(n_r, np.nan); ro = np.full(n_r, np.nan)
+    for i in range(n_r):
+        m = (r >= edges[i]) & (r < edges[i + 1])
+        if m.any():
+            ri[i] = inner[m].mean(); ro[i] = outer[m].mean()
+    ok = np.isfinite(ri)
+    rc = 0.5 * (edges[:-1] + edges[1:])
+    return rc[ok], ri[ok], ro[ok]
+
+
+def thickness_stack(root, ids=None, *, n_ecc=201, half_width_um=2600.0, n_r=150):
+    """Fovea-centred ``[N, 8, n_ecc]`` JHU-scheme thickness stack from OCTA-500 volumes.
+
+    Each eye is radially averaged (the 3 mm pit is ~circular), split at the OPL/ONL divide,
+    sub-divided into the 8 JHU layers by canonical ratios, and mirrored onto a symmetric
+    signed-eccentricity grid. OCTA-500 only reaches ±1.5 mm, so the perifoveal plateau is held
+    flat out to ``half_width_um`` (it is already flat by ~1.05 mm) — keeping the grid compatible
+    with the JHU model for wide scans.
+    """
+    ids = ids if ids is not None else normal_ids(root)
+    ecc = np.linspace(-half_width_um, half_width_um, n_ecc)
+    inner_r, outer_r = _canonical_ratios()
+    stack = []
+    for sid in ids:
+        L = load_layer(root, sid)
+        if L is None:
+            continue
+        rc, ri, ro = _radial_compartments(L, n_r, r_max_um=1450.0)
+        if rc.size < 8:
+            continue
+        inner = np.interp(np.abs(ecc), rc, ri)             # flat-clamped beyond the last bin
+        outer = np.interp(np.abs(ecc), rc, ro)
+        prof = np.zeros((len(SHAPE_LAYERS), n_ecc))
+        for j, name in enumerate(SHAPE_LAYERS):
+            prof[j] = inner * inner_r[name] if name in inner_r else outer * outer_r[name]
+        stack.append(prof)
+    return np.asarray(stack), ecc
+
+
+def fit_shape_model(root, *, ids=None, n_modes: int = 8, **kw):
+    """Fit a normal-eye :class:`~octsim.shape_model.LayerShapeModel` from OCTA-500 volumes."""
+    from ..shape_model import LayerShapeModel
+    ids = ids if ids is not None else normal_ids(root)
+    stack, ecc = thickness_stack(root, ids, **kw)
+    if stack.shape[0] < 10:
+        raise RuntimeError(f"only {stack.shape[0]} usable eyes; check root/filters")
+    return LayerShapeModel.fit(
+        stack, ecc, SHAPE_LAYERS, n_modes=n_modes, axial_pitch_um=AXIAL_PITCH_UM,
+        undulation_rms_um=4.0,
+        source=f"OCTA-500 3mm NORMAL (volumetric, {stack.shape[0]} eyes)")
+
+
 def build_macula_profile(root) -> MaculaProfile:
     """Measure the macular geometry artifact from an extracted OCTA-500 tree."""
     ids = normal_ids(root)
