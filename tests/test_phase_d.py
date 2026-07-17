@@ -64,6 +64,26 @@ def test_coherent_texture_field_is_smooth_in_y():
     assert cc(g0, g_near) > cc(g0, g_far)                 # decorrelates with slow-axis distance
 
 
+def test_volume_speckle_is_coherent_across_frames():
+    # a densely-sampled volume shares speckle between adjacent frames (no boiling); a coarsely
+    # sampled one decorrelates. The COMPLEX field isolates speckle from the (always-smooth)
+    # anatomy: independent speckle -> complex corr ~0 even where the magnitude/anatomy correlates.
+    def adj_complex_corr(slow_fov):
+        cfg = _cfg(anatomy="macula", scan_pattern="volume", n_frames=10, slow_fov_um=slow_fov,
+                   lateral_fov_um=3000.0, lines_per_frame=160, sample_depth_um=680.0,
+                   noise_free=True)
+        res = simulate(cfg, seed=2)
+        vol = res.volume; nz = vol.shape[1]
+        m = vol[:, int(nz * 0.55):int(nz * 0.9), :].reshape(vol.shape[0], -1)
+        cc = lambda a, b: abs(np.vdot(a, b)) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)
+        return float(np.mean([cc(m[i], m[i + 1]) for i in range(len(m) - 1)]))
+    dense = adj_complex_corr(160.0)     # slow pitch << beam waist -> correlated speckle
+    coarse = adj_complex_corr(4000.0)   # slow pitch >> beam waist -> independent speckle
+    assert dense > 0.15                 # adjacent frames share speckle (contiguous)
+    assert dense > coarse + 0.1         # denser sampling -> more coherent
+    assert coarse < 0.1                 # coarse sampling stays physically decorrelated
+
+
 def test_volume_motion_is_correlated_across_frames():
     cfg = _cfg(anatomy="macula", scan_pattern="volume", n_frames=10, slow_fov_um=600.0,
                motion_level=1.0, axial_motion_um=3.0, microsaccade=False)

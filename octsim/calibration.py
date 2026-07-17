@@ -54,14 +54,14 @@ class CalibrationProfile:
     """A full parameter set the RetinaModel consumes; JSON-serialisable."""
 
     layers: list                       # list[LayerCal]
-    boundary_sharpness_um: float = 5.0
+    boundary_sharpness_um: float = 8.0     # softer inter-layer transitions (averaged-data look)
     curvature_radius_um: float = 37500.0   # near-fovea radius (concave-up bowl)
     curvature_sag_max_um: float = 520.0    # saturating peripheral rise
     curvature_concave: bool = True         # True = posterior-pole bowl (center deepest)
     pit_radius_um: float = 700.0
     pit_radius_std_um: float = 110.0
     onl_bulge: float = 0.55
-    choroid_contrast: float = 0.55
+    choroid_contrast: float = 0.32         # subtle choroidal lucencies (averaged-data look)
     backscatter_gain: float = 1.0          # maps relative reflectivity -> sim amplitude
     n_scans: int = 0                       # provenance: how many real B-scans were averaged
     source: str = "literature"
@@ -377,7 +377,6 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     unaffected — the sampled thickness field just drives the physics forward model.
     """
     from .anatomy.retina import RETINA_LAYERS, RetinaModel, BoundaryUndulation
-    from .features import BloodVessel
 
     optics = optics or literature_profile()
     opt_by_name = {ly.name: ly for ly in optics.layers}
@@ -405,16 +404,11 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
                                     else canon.interface_reflectivity)))
 
     center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-60, 60))
-    vessels = []
-    for _ in range(int(rng.integers(2, 6))):
-        vx = float(rng.uniform(0.1, 0.9)) * lateral_fov_um
-        if location == "macula" and abs(vx - center_x) < 250.0:
-            vx += 300.0 * np.sign(vx - center_x + 1e-9)
-        c = float(rng.uniform(30.0, 120.0))
-        vessels.append(BloodVessel(
-            x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=c,
-            plexus_offset_um=(0.0 if c > 80 else float(rng.choice([0.0, 0.0, 25.0, 50.0]))),
-            slope=float(rng.uniform(-0.4, 0.4)), shadow_od=float(rng.uniform(0.7, 1.5))))
+    # shared vessel builder — subtle shadows + the real OCTA-500 avascular-zone radius, so the
+    # default (shape-model) path and the parametric path stay in lock-step.
+    from .anatomy.retina import random_macular_vessels
+    vessels = random_macular_vessels(rng, center_x_um=center_x,
+                                     lateral_fov_um=lateral_fov_um, location=location)
 
     undU = BoundaryUndulation.make(len(RETINA_LAYERS) + 2, rng,
                                    amp_um=float(np.clip(shape.undulation_rms_um * 1.1, 2.0, 9.0)),

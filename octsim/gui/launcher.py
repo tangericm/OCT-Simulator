@@ -9,6 +9,8 @@ a pyqtgraph volume/batch browser.
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import threading
 import traceback
@@ -20,9 +22,17 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QScrollArea, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..config import SimConfig
+from ..config import SimConfig, config_from_mapping
 from ..generate import generate_dataset, simulate
 from .widgets import FigurePanel, StackBrowser
+
+
+def _settings_path() -> str:
+    """Where the GUI persists the last-used settings (per user, cross-session)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".octsim")
+    d = os.path.join(base, "octsim")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "gui_settings.json")
 
 # (section title, [(label, attr, kind, options?)])
 SECTIONS = [
@@ -67,8 +77,11 @@ SECTIONS = [
     ]),
     ("Anatomy / Scene", [
         ("Anatomy", "anatomy", "combo", ["macula", "onh", "periphery", "mirror", "paper", "cornea"]),
+        ("Geometry model", "shape_model", "combo",
+         ["normal", "octa500", "jhu", "dme", "parametric"]),
         ("Sample depth (µm)", "sample_depth_um", "float", None),
         ("Lateral offset (µm)", "sample_lateral_offset_um", "float", None),
+        ("Averages (1=raw, >1=acquired look)", "averages", "int", None),
         ("Randomize", "randomize", "bool", None),
     ]),
     ("Batch", [
@@ -92,6 +105,7 @@ class Launcher(QWidget):
         self.batch = None
         self._build()
         self._apply_config(SimConfig())
+        self._load_settings()             # restore the last-used settings, if any
         self._update_derived()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
@@ -106,14 +120,28 @@ class Launcher(QWidget):
         bar = QHBoxLayout()
         self.gen_btn = QPushButton("Generate")
         self.gen_btn.clicked.connect(self._generate_one)
+        self.gen_btn.setToolTip("Render ONE sample from the current settings — a single B-scan, "
+                                "or a CONTIGUOUS volume when Pattern = volume (its frames share "
+                                "anatomy + speckle and are scrubbable on the Volume / batch tab).")
         self.batch_btn = QPushButton("Generate N")
         self.batch_btn.clicked.connect(self._generate_batch)
+        self.batch_btn.setToolTip("Render N INDEPENDENT random eyes (a dataset for training) — "
+                                  "these are NOT contiguous frames. For a contiguous volume set "
+                                  "Pattern = volume and use Generate instead.")
         self.rand_btn = QPushButton("Randomize")
         self.rand_btn.clicked.connect(self._randomize)
+        self.save_btn = QPushButton("Save settings")
+        self.save_btn.clicked.connect(lambda: (self._save_settings(explicit=True)))
+        self.save_btn.setToolTip("Persist the current settings; they are also auto-saved on "
+                                 "Generate and on close, and restored next launch.")
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.clicked.connect(self._reset_settings)
+        self.reset_btn.setToolTip("Restore the built-in defaults.")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(lambda: self.cancel.set())
         self.stop_btn.setEnabled(False)
-        for b in (self.gen_btn, self.batch_btn, self.rand_btn, self.stop_btn):
+        for b in (self.gen_btn, self.batch_btn, self.rand_btn, self.save_btn,
+                  self.reset_btn, self.stop_btn):
             bar.addWidget(b)
         left.addLayout(bar)
 
@@ -231,6 +259,43 @@ class Launcher(QWidget):
             else:
                 w.setText(f"{val:g}")
 
+    # ---------------------------------------------------------------- settings persistence
+    def _save_settings(self, *, explicit: bool = False) -> None:
+        """Write the current UI settings to disk (best-effort; never blocks generation)."""
+        try:
+            data = self._make_config().to_dict()   # typed + normalized, round-trips cleanly
+            with open(_settings_path(), "w") as fh:
+                json.dump(data, fh, indent=2)
+            if explicit:
+                self._log(f"settings saved -> {_settings_path()}")
+        except Exception as exc:
+            if explicit:
+                self._log(f"could not save settings: {exc}")
+
+    def _load_settings(self) -> None:
+        """Restore the last-used settings if a saved file exists (tolerant of schema drift)."""
+        path = _settings_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+            # coerce/validate through the config so a stale or partial file can't wedge the UI
+            cfg = config_from_mapping(raw).normalized()
+            self._apply_config(cfg)
+            self._log(f"restored settings from {path}")
+        except Exception as exc:
+            self._log(f"could not load settings ({exc}); using defaults")
+
+    def _reset_settings(self) -> None:
+        self._apply_config(SimConfig())
+        self._update_derived()
+        self._log("settings reset to defaults")
+
+    def closeEvent(self, event) -> None:      # noqa: N802 (Qt override)
+        self._save_settings()
+        super().closeEvent(event)
+
     def _update_derived(self) -> None:
         try:
             rc = self._make_config().resolve()
@@ -249,7 +314,7 @@ class Launcher(QWidget):
 
     # ---------------------------------------------------------------- worker
     def _busy(self, on: bool) -> None:
-        for b in (self.gen_btn, self.batch_btn, self.rand_btn):
+        for b in (self.gen_btn, self.batch_btn, self.rand_btn, self.save_btn, self.reset_btn):
             b.setEnabled(not on)
         self.stop_btn.setEnabled(on)
         self.progress.setVisible(on)
@@ -280,7 +345,9 @@ class Launcher(QWidget):
         except Exception as exc:
             self._log(f"invalid settings: {exc}")
             return
-        self._start(lambda: ("sample", simulate(cfg)), "Generating sample…")
+        self._save_settings()
+        kind = "volume" if cfg.scan_pattern == "volume" else "B-scan"
+        self._start(lambda: ("sample", simulate(cfg)), f"Generating {kind}…")
 
     def _generate_batch(self) -> None:
         try:
@@ -288,8 +355,10 @@ class Launcher(QWidget):
         except Exception as exc:
             self._log(f"invalid settings: {exc}")
             return
+        self._save_settings()
         n = cfg.n_samples
-        self._start(lambda: ("batch", list(generate_dataset(cfg, n))), f"Generating {n} samples…")
+        self._start(lambda: ("batch", list(generate_dataset(cfg, n))),
+                    f"Generating {n} independent samples…")
 
     def _randomize(self) -> None:
         w = self._widgets["seed"]

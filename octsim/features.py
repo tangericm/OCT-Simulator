@@ -76,10 +76,13 @@ class BloodVessel:
                 r[wall] += self.wall_amp * g
 
         # posterior shadow: begins at the vessel's BACK wall, tapers laterally, and
-        # deepens with caliber (longer blood path -> more attenuation).
-        od = self.shadow_od * (0.6 + 0.6 * min(cal / 120.0, 1.5))
+        # deepens with caliber (longer blood path -> more attenuation). The vertical onset
+        # ramps in gradually over ~one caliber (a hard step reads as an unphysical blob edge
+        # that is not seen in frame-averaged clinical B-scans).
+        od = self.shadow_od * (0.6 + 0.5 * min(cal / 120.0, 1.5))
         lateral = np.exp(-((x - xv) / (0.6 * cal)) ** 2)[None, :]  # [1, n_x]
-        below = (depth[:, None] > center_z + z_half).astype(float)
+        onset = max(0.5 * cal, 4.0 * ctx.dz)
+        below = np.clip((depth[:, None] - (center_z + z_half)) / onset, 0.0, 1.0)
         r *= 1.0 - (1.0 - np.exp(-od)) * lateral * below
 
 
