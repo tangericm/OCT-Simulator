@@ -111,11 +111,14 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     raise ValueError(f"unknown anatomy {a!r}")
 
 
-#: bundled shape-model artifacts. Default is the JHU healthy-control (normal-eye) model;
-#: the Duke DME model is kept for disease-geometry generation.
+#: bundled shape-model artifacts. Default is the OCTA-500 healthy-eye model (fit from real
+#: 3D macular volumes, so its foveal pit is deep and physiologic — rel-depth 0.63); the JHU
+#: healthy-control model is kept as an alternative (its 49-B-scan volumes give a shallower,
+#: parafovea-diluted pit), and the Duke DME model for disease geometry.
 _BUNDLED_SHAPE = {
+    "octa500": "retina_shape_octa500.npz",
+    "normal": "retina_shape_octa500.npz", "default": "retina_shape_octa500.npz",
     "jhu": "retina_shape_jhu_hc.npz", "hc": "retina_shape_jhu_hc.npz",
-    "normal": "retina_shape_jhu_hc.npz", "default": "retina_shape_jhu_hc.npz",
     "duke": "retina_shape_duke.npz", "dme": "retina_shape_duke.npz",
 }
 

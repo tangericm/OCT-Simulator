@@ -68,22 +68,26 @@ variation. Labels are unaffected — the simulator still emits exact layer maps.
 
 Beyond per-layer optics, the *geometry* (layer-thickness profiles, foveal-pit morphology) is
 learned from real segmentations by a PCA `octsim.shape_model.LayerShapeModel` and sampled per
-eye. Two models ship (raw data is never committed — only the tiny fitted `.npz`):
+eye. Three models ship (raw data is never committed — only the tiny fitted `.npz`):
 
 | bundled name | file | source | use |
 | --- | --- | --- | --- |
-| `normal` / `jhu` (**default**) | `retina_shape_jhu_hc.npz` (~90 KB) | JHU **healthy controls** (He 2019, 309 foveal B-scans) | normal-eye geometry |
+| `normal` / `octa500` (**default**) | `retina_shape_octa500.npz` (~120 KB) | OCTA-500 **normal eyes** (92 real 3D macular volumes) | normal-eye geometry, **deep physiologic pit** |
+| `jhu` / `hc` | `retina_shape_jhu_hc.npz` (~90 KB) | JHU **healthy controls** (He 2019, 309 foveal B-scans) | normal geometry, shallower (diluted) pit |
 | `duke` / `dme` | `retina_shape_duke.npz` (~80 KB) | Duke **DME** (Chiu 2015, 85 scans) | diabetic / edema geometry |
 
-**The default is the healthy-eye (JHU) model** — DME eyes distort the foveal contour and their
-fluid isn't a segmented class, so that geometry is unsafe as a normal prior. From the config /
-GUI / API:
+**The default is the OCTA-500 healthy-eye model.** It is fit from real *3D* macular cubes (dense,
+fovea-centred), so its foveal pit is deep and physiologic (rel-depth 0.63) — see the OCTA-500
+section below for how it is built and why it replaced the JHU model (whose sparse 49-B-scan
+volumes gave a parafovea-diluted, too-shallow pit of ~0.86). The JHU and Duke models remain
+selectable. From the config / GUI / API:
 
 ```python
 from octsim import SimConfig, simulate
-res = simulate(SimConfig(anatomy="macula"), seed=2)                       # normal (default)
-res = simulate(SimConfig(anatomy="macula", shape_model="dme"), seed=2)    # diabetic geometry
-res = simulate(SimConfig(anatomy="macula", shape_model="parametric"))     # hand-tuned pit
+res = simulate(SimConfig(anatomy="macula"), seed=2)                        # normal (OCTA-500, default)
+res = simulate(SimConfig(anatomy="macula", shape_model="jhu"), seed=2)     # JHU normal (shallower pit)
+res = simulate(SimConfig(anatomy="macula", shape_model="dme"), seed=2)     # diabetic geometry
+res = simulate(SimConfig(anatomy="macula", shape_model="parametric"))      # hand-tuned pit
 ```
 
 Or explicitly, geometry from data + optics from a profile, exact labels preserved:
@@ -91,14 +95,16 @@ Or explicitly, geometry from data + optics from a profile, exact labels preserve
 ```python
 import numpy as np
 from octsim import LayerShapeModel, retina_from_shape_model, literature_profile
-sm = LayerShapeModel.load("octsim/data/retina_shape_jhu_hc.npz")
+sm = LayerShapeModel.load("octsim/data/retina_shape_octa500.npz")
 m = retina_from_shape_model(sm, np.random.default_rng(0), optics=literature_profile(),
                             location="macula", lateral_fov_um=6000.0)
 ```
 
-Refit either model from the raw data (deterministic; produces the same `.npz`):
+Refit any model from the raw data (deterministic; produces the same `.npz`):
 
 ```bash
+# OCTA-500 normal eyes (the default) — from the release tree or zip (see the section below):
+python scripts/fit_octa500.py --root path/to/OCTA-500        # writes retina_shape_octa500.npz + more
 # JHU healthy controls — download OCT_Manual_Delineations-2018_June_29_b.zip from
 # iacl.ece.jhu.edu (or the MEDIC portal), unzip, point --root at the delineation/ folder:
 python scripts/fit_shape_model.py --dataset jhu_hc --root path/to/delineation \
@@ -178,14 +184,28 @@ strongest confirmation yet of the bowl curvature); a normal **FAZ radius ~324 µ
 0.33 mm²), now the simulator's `retina.FAZ_RADIUS_UM` avascular-zone constant (was a hand-picked
 250 µm); and a perifoveal plateau ~338 µm, consistent with the physics-model thickness.
 
-**What it flagged (open calibration).** OCTA-500's dense-volume fovea has a **deep pit** —
-central 212 µm vs a 338 µm plateau, **relative depth 0.63**. The current default geometry (the
-JHU shape model) reproduces a **shallower** pit (rel-depth ~0.86): the 49-B-scan JHU volumes are
-imperfectly foveal-centred, so their *mean* fovea is parafovea-diluted (its own fitted mean is
-central 250 / plateau 282 µm). OCTA-500 is the better foveal reference; `test_octa500.py` pins
-this gap so a future foveal recalibration (refit the pit from OCTA-500's volumetric segmentation)
-moves it the right way. This is a deliberate, surfaced decision — the default geometry is left
-unchanged pending that refit.
+**What it fixed — the default foveal pit (now OCTA-500).** OCTA-500's dense-volume fovea has a
+**deep pit** (central 212 µm vs a 338 µm plateau, **rel-depth 0.63**, pit depth ~125 µm). The
+former default (the JHU model) rendered a **shallow** pit (rel-depth ~0.86, its fitted mean only
+central 250 / plateau 282 µm → a 32 µm pit). Both are valid *healthy* data — the difference is
+**sampling fidelity, not biology**: the foveal pit is only ~1 mm wide, so JHU's sparse 49-B-scan,
+~6 mm volumes under-sample it (the pit falls between slices / off-centre, and the aggregation
+mixes foveal with parafoveal columns), diluting the mean pit to a non-physiologic 32 µm; OCTA-500's
+304-B-scan dense cubes, radially averaged about each eye's foveal minimum, resolve the true
+~125 µm pit. (Two other differences only shift absolute µm, not the pit ratio: Spectralis-vs-RTVue
+calibration, and JHU tracing ILM→RPE vs OCTA-500 ILM→BM — hence the 282 vs 338 plateaus.)
+
+So the **default normal shape model is now `retina_shape_octa500.npz`**, fit from the volumetric
+segmentation. OCTA-500's 6 surfaces are not confidently named histologically, but the OPL/ONL
+divide is unambiguous from *physiology*: surface 2 is where the inner compartment (ILM→S2)
+collapses at the fovea (190→30 µm) while the outer (S2→BM) *bulges* (150→189 µm, the
+photoreceptor/ONL foveal bulge). We split the real ILM→BM at that divide and sub-divide each
+compartment into the JHU 8-layer scheme by the sim's canonical parafoveal ratios — so total
+thickness and pit depth come from OCTA-500 while `calibration._layer_split_map` maps it onto the
+11 sim layers unchanged. Rendered pit rel-depth is now ~0.65 (was ~0.86); `test_octa500.py` pins
+it. **JHU stays selectable** (`shape_model="jhu"`): it reaches ±2.6 mm (vs OCTA-500's ±1.5 mm,
+where the flat plateau is held) and has real 8-surface per-layer structure — a future hybrid could
+take OCTA-500's pit inside ±1.5 mm and JHU's finer layers / wider field outside.
 
 **Appearance.** The RTVue-XR *structural* B-scan is the average of the repeated OCTA acquisitions,
 so its speckle contrast is **0.34** (≈2.3 effective frames) — a genuinely different, frame-averaged
@@ -195,10 +215,11 @@ cross-check of the averaging model (0.52/0.34 ≈ √2.3).
 
 ## Field of view and the optic nerve head
 
-The healthy-eye shape model is fit out to **±2.6 mm eccentricity** (using the full width of each
-foveal B-scan, not just the central pit), so wide scans get a real foveal→parafoveal→perifoveal
-thickness profile (foveal ~250 µm rising to a ~320 µm perifoveal plateau, GCIP peaking
-parafoveally, RNFL thickening outward).
+The healthy-eye shape models are sampled on a **±2.6 mm eccentricity** grid, so wide scans get a
+real foveal→parafoveal→perifoveal thickness profile. The default OCTA-500 model has real data to
+**±1.5 mm** (the 3 mm cube) with the perifoveal plateau (~338 µm, already flat by ~1.05 mm) held
+constant beyond that; the JHU model carries real data all the way to ±2.6 mm (foveal ~250 µm
+rising to a ~282 µm plateau, GCIP peaking parafoveally, RNFL thickening outward).
 
 `RetinaModel` carries **both** a fovea and an optic disc at their anatomical separation
 (`disc_dx_um` ≈ 4.76 mm). When a scan is wide enough to reach the disc (≳ 7–8 mm) or is
@@ -217,13 +238,13 @@ calibrate the disc dimensions.
 ## Roadmap
 
 - **Done:** per-layer optics + curvature + boundary sharpness from data; a PCA shape model that
-  samples real foveal-pit / thickness geometry from a **healthy-eye** dataset (default, ±2.6 mm)
-  or a DME one; a unified fovea+disc field so the ONH appears at wide FOV; a multi-device texture
-  prior + separate disease profiles; and a **volumetric** OCTA-500 reference (real 3D macular
-  cubes) that validated the concave bowl, set the FAZ radius, and pinned the foveal-pit depth;
-  all wired into the config/GUI with a parametric opt-out.
-- **Next (highest-value):** **deepen the default foveal pit** — refit the macular geometry from
-  OCTA-500's volumetric segmentation (rel-depth 0.63 vs the current JHU-diluted 0.86), splitting
-  its ILM→BM total by the canonical 11-layer ratios so only surfaces we're confident about drive
-  it. Then: a foveal-vs-parafoveal sampling knob; learn the global curvature + ONL bulge as modes;
-  calibrate the disc from local ONH segmentations; linear-domain optics from Maestro `.raw`.
+  samples real foveal-pit / thickness geometry — the **default is now the OCTA-500 volumetric
+  model** (real deep pit, rel-depth 0.63), with the JHU and DME models selectable; a unified
+  fovea+disc field so the ONH appears at wide FOV; a multi-device texture prior + separate disease
+  profiles; and the OCTA-500 reference (real 3D macular cubes) that validated the concave bowl, set
+  the FAZ radius, and **refit the default foveal pit**; all wired into the config/GUI with a
+  parametric opt-out.
+- **Next (highest-value):** a **hybrid macular model** — OCTA-500's deep pit inside ±1.5 mm blended
+  with JHU's finer 8-surface per-layer structure and wider ±2.6 mm field. Then: a
+  foveal-vs-parafoveal sampling knob; learn the global curvature + ONL bulge as modes; calibrate the
+  disc from local ONH segmentations; linear-domain optics from Maestro `.raw`.

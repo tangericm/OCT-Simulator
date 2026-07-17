@@ -8,7 +8,9 @@ eyes, and writes:
   * ``octsim/data/texture_octa500.json`` — the frame-averaged RTVue-XR appearance profile
     (kept separate from the single-frame healthy default; see ``data/unlabeled.py``);
   * ``octsim/data/octa500_macula.json``  — the real radial ILM→BM thickness profile, foveal
-    pit metrics, and FAZ radius (a geometry validation reference).
+    pit metrics, and FAZ radius (a geometry validation reference);
+  * ``octsim/data/retina_shape_octa500.npz`` — the **default** normal-eye shape model (real
+    deep foveal pit), fit from the volumetric layer segmentation.
 
     python scripts/fit_octa500.py --root path/to/OCTA-500 --out-dir octsim/data
 
@@ -59,6 +61,13 @@ def main() -> int:
     print(f"macula: central {mac.central_thickness_um:.0f} um  plateau "
           f"{mac.perifoveal_plateau_um:.0f} um  rel-depth {mac.pit_relative_depth:.3f}  "
           f"FAZ r {mac.faz_radius_um_median:.0f} um  ({mac.n_eyes_normal} normal eyes)")
+
+    sm = o5.fit_shape_model(root, ids=ids)
+    sm.save(os.path.join(args.out_dir, "retina_shape_octa500.npz"))
+    e = abs(sm.ecc_grid_um); tot = sm.mean_thickness.sum(axis=0)
+    rel = tot[e < 75].mean() / tot[(e >= 1000) & (e <= 1300)].mean()
+    print(f"shape model: {sm.n_scans} eyes  mean pit rel-depth {rel:.3f}  "
+          f"-> retina_shape_octa500.npz (the default normal geometry)")
 
     if tmp:
         import shutil

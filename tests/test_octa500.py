@@ -63,32 +63,42 @@ def test_faz_avascular_zone_matches_octa500():
         assert abs(v.x0_um - cx) >= R.FAZ_RADIUS_UM - 1.0
 
 
-def test_sim_pit_is_shallower_than_octa500_reference():
-    """Documents the known gap: the JHU-driven default fovea is shallower (parafovea-diluted
-    49-B-scan volumes) than OCTA-500's dense-volume real pit. Kept as a guard so a future
-    foveal calibration moves the number in the right direction."""
-    from octsim.shape_model import LayerShapeModel
+def test_default_shape_model_is_octa500_volumetric():
+    from octsim.generate import _resolve_shape_model
+    for name in ("normal", "default", "octa500"):
+        sm = _resolve_shape_model(name)
+        assert "OCTA-500" in sm.source
+    # the model's own mean fovea reproduces the real deep pit
+    sm = _resolve_shape_model("normal")
+    e = np.abs(sm.ecc_grid_um); tot = sm.mean_thickness.sum(axis=0)
+    rel = tot[e < 75].mean() / tot[(e >= 1000) & (e <= 1300)].mean()
+    assert abs(rel - o5.bundled_macula().pit_relative_depth) < 0.05
+
+
+def test_default_fovea_matches_octa500_depth():
+    """The default (now OCTA-500 volumetric) fovea is deep, matching the real pit — not the
+    shallow, parafovea-diluted JHU pit it replaced."""
+    from octsim.generate import _resolve_shape_model
     from octsim.calibration import retina_from_shape_model, literature_profile
     from octsim.anatomy import retina as R
-    sm = LayerShapeModel.load(os.path.join(os.path.dirname(o5.__file__), "retina_shape_jhu_hc.npz"))
+    sm = _resolve_shape_model("normal")
     x = np.linspace(0.0, 3000.0, 304)
     bm = [l.name for l in R.RETINA_LAYERS].index("RPE") + 1
     ratios = []
     for seed in range(12):
         mdl = retina_from_shape_model(sm, np.random.default_rng(seed), optics=literature_profile(),
                                       location="macula", lateral_fov_um=3000.0)
-        ob = mdl.cross_section(0.0, x).opt_b
-        th = ob[bm] - ob[0]
+        th = mdl.cross_section(0.0, x).opt_b[bm] - mdl.cross_section(0.0, x).opt_b[0]
         sm_th = np.convolve(th, np.ones(9) / 9, "same")
         fi = int(np.argmin(sm_th[40:264])) + 40
         ecc = np.abs(x - x[fi])
-        cen = th[ecc < 75].mean(); plat = th[(ecc >= 1000) & (ecc <= 1300)].mean()
+        plat = th[(ecc >= 1000) & (ecc <= 1300)].mean()
         if np.isfinite(plat) and plat > 0:
-            ratios.append(cen / plat)
+            ratios.append(th[ecc < 75].mean() / plat)
     sim_rel = float(np.mean(ratios))
     real_rel = o5.bundled_macula().pit_relative_depth
-    assert real_rel < sim_rel                    # the real pit is deeper (smaller ratio)
-    assert sim_rel < 1.0                          # the sim still has a pit
+    assert abs(sim_rel - real_rel) < 0.12          # deep, physiologic pit
+    assert sim_rel < 0.80                          # clearly deeper than the old JHU ~0.86
 
 
 if __name__ == "__main__":
