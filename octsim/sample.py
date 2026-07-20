@@ -30,6 +30,13 @@ from typing import Callable
 
 import numpy as np
 
+#: Correlation length of the K-distribution Gamma modulator, as a MULTIPLE of the resolution cell.
+#: The modulator must vary SLOWLY relative to the reconstruction PSF / lateral beam so it factors
+#: out of the convolution as a slow envelope: intensity ≈ tex·|PSF⊛g|² = tex·(Rayleigh) → a genuine
+#: compound-K distribution. Grain ≈ 1 cell gets averaged back to Rayleigh (CLT) and makes M inert.
+_K_AXIAL_GRAIN_PX = 6.0        # axial: several recon pixels (a few axial resolution cells)
+_K_LATERAL_GRAIN_BEAMS = 2.5   # lateral: multiples of the beam waist (slow vs the beam filter)
+
 
 @dataclass
 class Layer:
@@ -141,6 +148,7 @@ def build_reflectivity_from_boundaries(
     boundary_sharpness_um: float = 0.0,
     texture_field: "CoherentField | None" = None,
     speckle: np.ndarray | None = None,
+    k_shape: float | None = None,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
 
@@ -237,6 +245,39 @@ def build_reflectivity_from_boundaries(
     else:
         g = (rng.standard_normal((n_depth, n_x))
              + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+    # --- K-distributed speckle: Gamma-modulate the local circular-Gaussian variance. ---------
+    # amplitude = |g|·sqrt(tex), tex ~ Gamma(M, 1/M) with E[tex]=1, so E[|field|²] is UNCHANGED
+    # (backscatter map, layer-brightness template, interface reflectors, Beer-Lambert roll-off
+    # all carried by the mean → preserved). Intensity contrast rises to sqrt(1+2/M): M→∞ recovers
+    # fully-developed Rayleigh (today's look); small M gives the super-Rayleigh heavy tail real
+    # OCT shows in sparse layers (ONL/INL/vitreous). ``None`` skips it → byte-identical to before.
+    # The modulator is smoothed to the resolution-cell grain so the lateral beam filter / axial PSF
+    # don't average it away (that grain-matching is what makes M identifiable), then renormalized
+    # to exact per-frame E[tex]=1. Uses a spawned child stream so ``features`` below draw identically
+    # whether K-mode is on or off (clean A/B; label map is upstream and unaffected regardless).
+    if k_shape is not None and np.isfinite(k_shape):
+        try:
+            kc = rng.spawn(1)[0]
+        except Exception:
+            kc = rng
+        M = float(k_shape)
+        tex = kc.gamma(M, 1.0 / M, size=g.shape)          # mean 1, target intensity var 1/M
+        try:
+            from scipy.ndimage import gaussian_filter
+            lat_grain = max(_K_LATERAL_GRAIN_BEAMS * beam_waist_um / dx_um, 1.0)
+            tex = gaussian_filter(tex, (_K_AXIAL_GRAIN_PX, lat_grain), mode="nearest")
+        except Exception:
+            pass
+        # Smoothing gave the modulator its slow (super-PSF) correlation but shrank its variance;
+        # restore the marginal variance to 1/M so M actually controls the compound-K tail, keeping
+        # mean 1 (brightness preserved). Clip keeps sqrt real; final renorm pins E[tex]=1 exactly.
+        c = tex - float(np.mean(tex))
+        cur = float(np.std(c))
+        if cur > 1e-9:
+            tex = 1.0 + c * (np.sqrt(1.0 / M) / cur)
+        tex = np.clip(tex, 0.02, None)
+        tex *= 1.0 / (float(np.mean(tex)) + 1e-12)
+        g = g * np.sqrt(tex)
     r += g * backscatter_map
 
     if features:
@@ -261,7 +302,11 @@ class CoherentField:
                  corr_x_um: float = 80.0, corr_y_um: float = 350.0, contrast: float = 0.2):
         u = lambda: rng.uniform(0.6, 2.0, k)
         self.fz = (2.0 * np.pi) / (corr_z_um * u())
-        self.fx = (2.0 * np.pi) / (corr_x_um * u())
+        # RANDOMISE the lateral wavevector SIGN per component. Without this every cosine tilts the
+        # SAME (+z,+x) diagonal, so the k components reinforce into a coherent DIAGONAL GRATING — an
+        # obviously non-physical banding in the choroid/mottle. Random signs make the waves point in
+        # different directions, giving an isotropic (within the intended z/x anisotropy) mottle.
+        self.fx = (2.0 * np.pi) / (corr_x_um * u()) * rng.choice([-1.0, 1.0], k)
         # y-frequencies are kept LOW (periods >= corr_y) so the field varies slowly across the
         # slow axis — the correlation length in y is set by the shortest period, so a broad
         # high-frequency spread here would decorrelate adjacent frames. ``corr_y_um`` should be

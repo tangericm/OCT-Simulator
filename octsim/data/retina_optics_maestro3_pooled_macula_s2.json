@@ -1,0 +1,118 @@
+{
+  "layers": [
+    {
+      "name": "NFL",
+      "reflectivity": 0.01601657659161532,
+      "attenuation_per_um": 0.0045000000000000005,
+      "speckle_contrast": 1.0,
+      "thickness_um": 30.0,
+      "thickness_std_um": 3.5999999999999996,
+      "specular": 0.02
+    },
+    {
+      "name": "GCL",
+      "reflectivity": 0.0014560596069108278,
+      "attenuation_per_um": 0.0016,
+      "speckle_contrast": 1.0,
+      "thickness_um": 38.0,
+      "thickness_std_um": 4.56,
+      "specular": 0.0
+    },
+    {
+      "name": "IPL",
+      "reflectivity": 0.0067949448322505305,
+      "attenuation_per_um": 0.003,
+      "speckle_contrast": 1.0,
+      "thickness_um": 40.0,
+      "thickness_std_um": 4.8,
+      "specular": 0.0
+    },
+    {
+      "name": "INL",
+      "reflectivity": 0.0012133830057590232,
+      "attenuation_per_um": 0.0015,
+      "speckle_contrast": 1.0,
+      "thickness_um": 30.0,
+      "thickness_std_um": 3.5999999999999996,
+      "specular": 0.0
+    },
+    {
+      "name": "OPL",
+      "reflectivity": 0.007280298034554139,
+      "attenuation_per_um": 0.003,
+      "speckle_contrast": 1.0,
+      "thickness_um": 25.0,
+      "thickness_std_um": 3.0,
+      "specular": 0.0
+    },
+    {
+      "name": "ONL",
+      "reflectivity": 0.009023155025492887,
+      "attenuation_per_um": 0.0012,
+      "speckle_contrast": 1.0,
+      "thickness_um": 78.0,
+      "thickness_std_um": 9.36,
+      "specular": 0.0
+    },
+    {
+      "name": "ELM",
+      "reflectivity": 0.012207474873744482,
+      "attenuation_per_um": 0.003,
+      "speckle_contrast": 1.0,
+      "thickness_um": 5.0,
+      "thickness_std_um": 0.6,
+      "specular": 0.0
+    },
+    {
+      "name": "EZ",
+      "reflectivity": 0.05371288944447572,
+      "attenuation_per_um": 0.006,
+      "speckle_contrast": 1.0,
+      "thickness_um": 9.0,
+      "thickness_std_um": 1.08,
+      "specular": 0.0
+    },
+    {
+      "name": "IZ",
+      "reflectivity": 0.029297939696986755,
+      "attenuation_per_um": 0.005,
+      "speckle_contrast": 1.0,
+      "thickness_um": 7.0,
+      "thickness_std_um": 0.84,
+      "specular": 0.0
+    },
+    {
+      "name": "RPE",
+      "reflectivity": 0.06347886934347131,
+      "attenuation_per_um": 0.008,
+      "speckle_contrast": 1.0,
+      "thickness_um": 18.0,
+      "thickness_std_um": 2.16,
+      "specular": 0.0
+    },
+    {
+      "name": "choroid",
+      "reflectivity": 0.00990709022771396,
+      "attenuation_per_um": 0.003,
+      "speckle_contrast": 1.0,
+      "thickness_um": 260.0,
+      "thickness_std_um": 31.2,
+      "specular": 0.0
+    }
+  ],
+  "boundary_sharpness_um": 12.917689988588746,
+  "curvature_radius_um": 12000.0,
+  "curvature_sag_max_um": 1800.0,
+  "curvature_concave": true,
+  "pit_radius_um": 700.0,
+  "pit_radius_std_um": 110.0,
+  "onl_bulge": 0.55,
+  "choroid_contrast": 0.2993812062623462,
+  "backscatter_gain": 1.0,
+  "texture_contrast": 0.1260549699043632,
+  "interface_jitter": 0.3405330628304922,
+  "vitreous_backscatter": 0.0007525668937163947,
+  "directional_strength": 0.3460654013224265,
+  "n_scans": 0,
+  "source": "fitted"
+}
