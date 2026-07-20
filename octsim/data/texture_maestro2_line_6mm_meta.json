@@ -1,0 +1,11 @@
+{
+  "snr_db_mean": 45.32647498701346,
+  "snr_db_std": 0.1823149574421756,
+  "cnr_db_mean": 18.86191925073208,
+  "n_frames": 25,
+  "alines": 2048,
+  "stride": 2,
+  "axial_pitch_um": 3.87,
+  "lateral_pitch_um": 5.86,
+  "folder": "Line_6mm_2048Aline_135degCW_50frame_gain165"
+}
