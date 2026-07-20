@@ -23,7 +23,7 @@ Divide an optical depth by a layer's group index ``n`` to get physical depth.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -47,6 +47,11 @@ class LightSource:
     #: captures the Gaussian to ~3.5σ (>99.9% of the energy) while keeping the
     #: imaging depth generous; larger values trade depth range for tail fidelity.
     k_span_factor: float = 1.5
+    #: **measured** source envelope ``P(k)`` on this source's :meth:`k_grid` (length
+    #: ``n_k``, peak-normalised), from an instrument profile (FPN mean, k-linearised).
+    #: ``None`` (the default) reproduces the closed-form Gaussian exactly. Excluded from
+    #: equality/repr so a frozen ``LightSource`` stays hashable/serialisable.
+    measured_power: np.ndarray | None = field(default=None, compare=False, repr=False)
 
     # -- carrier / bandwidth in k-space (rad / µm) --------------------------
     @property
@@ -77,9 +82,22 @@ class LightSource:
         return (2.0 * self.k_span_factor * self.fwhm_k) / (self.n_k - 1)
 
     def power_spectrum(self, k: np.ndarray | None = None) -> np.ndarray:
-        """Gaussian source power ``P(k)`` (peak-normalised to 1)."""
+        """Source power ``P(k)`` (peak-normalised to 1).
+
+        Returns the **measured** envelope (interpolated onto ``k``) when
+        :attr:`measured_power` is set — the Tier-1 instrument grounding — and the
+        closed-form Gaussian otherwise (the default, so behaviour is unchanged)."""
         if k is None:
             k = self.k_grid()
+        if self.measured_power is not None:
+            mp = np.asarray(self.measured_power, dtype=float)
+            grid = self.k_grid()
+            if mp.shape == grid.shape and k is grid:
+                env = mp
+            else:                       # resample the measured envelope onto the query axis
+                env = np.interp(k, grid, mp, left=mp[0], right=mp[-1])
+            peak = float(env.max()) or 1.0
+            return env / peak
         return np.exp(-0.5 * ((k - self.k0) / self.sigma_k) ** 2)
 
     # -- derived resolution / depth calibration -----------------------------

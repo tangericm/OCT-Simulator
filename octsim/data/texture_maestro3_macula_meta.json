@@ -1,0 +1,11 @@
+{
+  "snr_db_mean": 52.04221179196247,
+  "snr_db_std": 0.2634131938714693,
+  "cnr_db_mean": 24.625678622842877,
+  "n_frames": 64,
+  "alines": 1024,
+  "stride": 1,
+  "axial_pitch_um": 3.87,
+  "lateral_pitch_um": 5.859375,
+  "folder": "6mm_1024Aline"
+}

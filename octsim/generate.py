@@ -89,8 +89,10 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
             try:                    # data-driven geometry from a learned shape model
                 from . import calibration
                 sm = _resolve_shape_model(sm_name)
+                optics = (_OPTICS_OVERRIDE if _OPTICS_OVERRIDE is not None
+                          else _resolve_optics_profile(config.optics_profile))
                 return calibration.retina_from_shape_model(
-                    sm, rng, location=a, lateral_fov_um=fov,
+                    sm, rng, optics=optics, location=a, lateral_fov_um=fov,
                     surface_opt_um=config.sample_depth_um,
                     lateral_offset_um=config.sample_lateral_offset_um)
             except Exception:
@@ -131,6 +133,54 @@ def _resolve_shape_model(name: str):
     if fn is not None:
         name = os.path.join(os.path.dirname(__file__), "data", fn)
     return LayerShapeModel.load(name)
+
+
+#: bundled fitted tissue-optics profiles (analogous to :data:`_BUNDLED_SHAPE`). ``None`` means
+#: "use the literature profile" — the default, so the shipped corpus is unchanged until a fit
+#: is committed and its keyword promoted here / set as the ``optics_profile`` default. A path
+#: is also accepted. Optics never touch geometry, so switching profile keeps ``label_map``
+#: bit-identical at a fixed seed.
+_BUNDLED_PROFILE = {
+    "literature": None, "parametric": None, "none": None, "": None,
+    "maestro3": "retina_optics_maestro3.json",
+    "maestro2": "retina_optics_maestro2.json",
+    "octa500": "retina_optics_octa500.json",
+}
+
+
+#: process-local in-memory optics override used by the calibration loop to inject a decoded
+#: θ profile without round-tripping through a temp JSON. ``None`` = use the named profile.
+#: Set via :func:`set_optics_override` (and always cleared in a ``finally``).
+_OPTICS_OVERRIDE = None
+
+
+def set_optics_override(profile) -> None:
+    """Inject an in-memory :class:`~octsim.calibration.CalibrationProfile` that
+    :func:`build_scene` uses in place of ``config.optics_profile`` (``None`` clears it).
+    Optics never touch geometry, so this cannot change ``label_map``."""
+    global _OPTICS_OVERRIDE
+    _OPTICS_OVERRIDE = profile
+
+
+@functools.lru_cache(maxsize=8)
+def _resolve_optics_profile(name: str):
+    """Resolve an optics-profile keyword/path to a :class:`~octsim.calibration.CalibrationProfile`.
+
+    Falls back to the literature profile for unknown/empty names or a missing bundled file,
+    so a not-yet-committed fit degrades gracefully to the shipped default."""
+    from . import calibration
+    key = (name or "literature").lower()
+    if key in _BUNDLED_PROFILE:
+        fn = _BUNDLED_PROFILE[key]
+        if fn is None:
+            return calibration.literature_profile()
+        path = os.path.join(os.path.dirname(__file__), "data", fn)
+        if os.path.exists(path):
+            return calibration.CalibrationProfile.load(path)
+        return calibration.literature_profile()
+    if os.path.exists(name):                    # an explicit path to a fitted profile JSON
+        return calibration.CalibrationProfile.load(name)
+    return calibration.literature_profile()
 
 
 def _scene_params(scene) -> dict:
@@ -174,7 +224,8 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 vitreous_backscatter=cross.vitreous_backscatter,
                 layer_directional=cross.layer_directional,
                 boundary_sharpness_um=cross.boundary_sharpness_um,
-                texture_field=cross.texture_field, speckle=speckle)
+                texture_field=cross.texture_field, speckle=speckle,
+                k_shape=getattr(cross, "speckle_shape", None))
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
 

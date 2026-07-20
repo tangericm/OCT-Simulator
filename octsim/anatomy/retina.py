@@ -129,6 +129,7 @@ class CrossSection:
     layer_directional: object = None     # [L, n_x] per-column directional gain (or None)
     boundary_sharpness_um: float = 0.0   # axial transition width (softens the bands)
     texture_field: object = None         # CoherentField for volume-coherent mottling (or None)
+    speckle_shape: float | None = None   # K-dist effective #scatterers M (None = Rayleigh)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -202,8 +203,9 @@ class RetinaModel:
     vessels: list = field(default_factory=list)
     # global curvature: concave-up posterior-pole bowl (center deepest), saturating so
     # a wide scan stays in-window. `curvature_radius_um` sets the near-fovea radius.
-    curvature_radius_um: float = 37500.0
-    curvature_sag_um: float = 520.0       # max peripheral rise of the bowl
+    curvature_radius_um: float = 12000.0  # apex radius of curvature (~globe radius)
+    curvature_sag_um: float = 1800.0      # depth-window overflow guard (not a shape knob)
+    curvature_conic: float = 0.0          # conic constant K (0=sphere, <-1 flattens periphery)
     curvature_concave: bool = True        # True = bowl (real posterior pole); False = legacy dome
     boundary_sharpness_um: float = 8.0    # axial reflectivity-transition width (softens bands)
     choroid_contrast: float = 0.32        # choroidal vascular lucency depth (subtle, averaged look)
@@ -224,6 +226,9 @@ class RetinaModel:
     # volume-coherent texture (fixed 3-D fields; sampled per frame -> smooth across a volume)
     mottle_field: object = None          # CoherentField for intra-layer mottling
     choroid_field: object = None         # CoherentField for the choroidal vascular pattern
+    # non-Rayleigh volume speckle: effective #scatterers per resolution cell (K-distribution
+    # shape M). None = fully-developed Rayleigh (legacy). Small M => super-Rayleigh heavy tail.
+    speckle_shape: float | None = None
 
     def _landmarks(self):
         """Return ``(fovea_x, disc_x_or_None)`` for this scene in absolute enface x (µm)."""
@@ -253,6 +258,7 @@ class RetinaModel:
         cross.vitreous_backscatter = self.vitreous_backscatter
         cross.boundary_sharpness_um = self.boundary_sharpness_um
         cross.texture_field = self.mottle_field
+        cross.speckle_shape = self.speckle_shape
         cross.layer_directional = self._directional_gain(cross.opt_b, x, groups)
         return cross
 
@@ -318,12 +324,24 @@ class RetinaModel:
         anatomic centre; a per-eye tilt is added.
         """
         xc = x - self.center_x_um
-        R = self.curvature_radius_um
-        sag_max = self.curvature_sag_um
-        if R <= 0 or sag_max <= 0:
+        R = self.curvature_radius_um              # apex radius of curvature (µm)
+        if R <= 0:
             bowl = np.zeros_like(x, dtype=float)
         else:
-            bowl = sag_max * (1.0 - np.exp(-(xc * xc) / (2.0 * R * sag_max)))
+            # CONIC (aspheric) sag: z = (h²/R) / (1 + sqrt(1 - (1+K)(h/R)²)). The conic constant K
+            # (``curvature_conic``) sets peripheral shape at fixed apex radius R: K=0 = sphere,
+            # K=-1 = parabola, K<-1 = hyperbolic FLATTENING toward the periphery, K>0 = oblate steepening.
+            # Real posterior-pole B-scans are ~spherical near the fovea but FLATTER at wide FOV than a
+            # sphere (device distortion-correction + aspheric anatomy — deep-research), which a single
+            # radius could not capture: a pure cap steepens at the edge and over-curves 9-12 mm scans.
+            # K=0 reproduces the previous spherical cap exactly (label-map invariant at the anchor).
+            K = float(getattr(self, "curvature_conic", 0.0))
+            h = np.abs(xc)
+            disc = 1.0 - (1.0 + K) * (h / R) ** 2
+            disc = np.maximum(disc, 1e-6)              # clamp (past the conic's real domain -> flat asymptote)
+            bowl = (h * h / R) / (1.0 + np.sqrt(disc))
+            if self.curvature_sag_um > 0:              # depth-window overflow guard ONLY (not a shape knob)
+                bowl = np.minimum(bowl, self.curvature_sag_um)
         # concave-up: centre deepest (largest offset), periphery shallow (0)
         depth = (bowl.max() - bowl) if self.curvature_concave else bowl
         tilt = self.tilt_um_per_mm * 1e-3 * (x - x.mean())
@@ -566,8 +584,8 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         center_y_um=float(rng.uniform(-100, 100)),
         pit_radius_um=float(rng.uniform(550.0, 850.0)),
         onl_bulge=float(rng.uniform(0.4, 0.7)),
-        curvature_radius_um=float(rng.uniform(30000.0, 48000.0)),
-        curvature_sag_um=float(rng.uniform(420.0, 640.0)),
+        curvature_radius_um=float(rng.uniform(11000.0, 14000.0)),
+        curvature_sag_um=float(rng.uniform(1700.0, 1900.0)),
         boundary_sharpness_um=float(rng.uniform(7.0, 11.0)),   # softer inter-layer transitions
         choroid_contrast=choroid_contrast,
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
@@ -586,10 +604,15 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
 
 
 def _texture_fields(rng, texture_contrast, choroid_contrast):
-    """Build the two volume-coherent 3-D texture fields (mottling + choroid) for a scene."""
+    """Build the two volume-coherent 3-D texture fields (mottling + choroid) for a scene.
+
+    ``k=32`` random-frequency components (up from 8): with the random-sign wavevectors in
+    :class:`CoherentField` a few components read as a plaid/weave, but ~32 fill the spectrum into a
+    natural isotropic mottle — the clinically-plausible spongy choroid instead of a diagonal grating.
+    """
     from ..sample import CoherentField
-    mottle = CoherentField(rng, corr_z_um=18.0, corr_x_um=70.0, corr_y_um=300.0,
+    mottle = CoherentField(rng, k=32, corr_z_um=18.0, corr_x_um=70.0, corr_y_um=300.0,
                            contrast=texture_contrast)
-    choroid = CoherentField(rng, corr_z_um=90.0, corr_x_um=180.0, corr_y_um=420.0,
+    choroid = CoherentField(rng, k=32, corr_z_um=90.0, corr_x_um=180.0, corr_y_um=420.0,
                             contrast=choroid_contrast)
     return mottle, choroid

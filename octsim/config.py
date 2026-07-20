@@ -130,6 +130,14 @@ class SimConfig:
     #: model (default), "duke"/"dme" = diabetic-macular-edema model, a .npz path, or
     #: "parametric"/"none" for the hand-tuned pit.
     shape_model: str = "normal"
+    #: tissue-optics profile (backscatter/attenuation/appearance): "literature" (default; the
+    #: shipped optics) or a fitted keyword/path ("maestro3", …). Optics never touch geometry,
+    #: so this leaves ``label_map`` bit-identical at a fixed seed.
+    optics_profile: str = "literature"
+    #: measured instrument grounding (source envelope P(k)/λ0/n_k/background/read floor):
+    #: "" = the closed-form Gaussian source (default, unchanged); "maestro3" or a JSON path
+    #: overlays the frozen Tier-1 measurements in :meth:`resolve`.
+    instrument: str = ""
     reference_amp: float = 4.0
 
     # --- batch ---
@@ -164,6 +172,8 @@ class SimConfig:
             setattr(self, name, max(0.0, float(getattr(self, name))))
         self.sample_lateral_offset_um = float(self.sample_lateral_offset_um)  # signed
         self.shape_model = str(self.shape_model or "")
+        self.optics_profile = str(self.optics_profile or "literature")
+        self.instrument = str(self.instrument or "")
 
         self.dispersion = float(self.dispersion)   # signed tuning knob
         self.noise_free = bool(self.noise_free)
@@ -228,6 +238,21 @@ class SimConfig:
 
         source = LightSource(center_wavelength_nm=lam0, bandwidth_fwhm_nm=bw,
                              n_k=n_k, k_span_factor=k_span)
+
+        # 2b) instrument overlay (Tier 1, measured + frozen): replace the closed-form Gaussian
+        #     source with the device's measured envelope P(k) and its grounded λ0/n_k/BW/k-span.
+        #     Empty instrument -> unchanged. The measured envelope aligns to this source's k_grid.
+        if self.instrument:
+            try:
+                from .instrument import load_instrument
+                inst = load_instrument(self.instrument)
+                source = inst.as_source()
+                lam0 = source.center_wavelength_nm
+                n_k = source.n_k
+                bw = source.bandwidth_fwhm_nm
+                k_span = source.k_span_factor
+            except Exception:
+                pass                    # missing/invalid instrument -> keep the Gaussian source
 
         # 3) lateral resolution <-> beam waist
         if self.lateral_resolution_um > 0:

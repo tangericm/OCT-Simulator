@@ -36,6 +36,17 @@ import numpy as np
 CANON_ORDER = ["NFL", "GCL", "IPL", "INL", "OPL", "ONL", "ELM", "EZ", "IZ", "RPE", "choroid"]
 
 
+def _eye_jitter(rng: np.random.Generator, mean: float, rel: float = 0.20) -> float:
+    """Per-eye value ``mean · U(1−rel, 1+rel)`` consuming **exactly one** rng draw.
+
+    Replacing a bare ``rng.uniform(lo, hi)`` appearance draw with this keeps the rng
+    stream position identical, so every downstream *geometry* draw (tilt, undulation,
+    thickness) — hence the exact ``label_map`` — is invariant to which optics profile
+    (θ) is in play. Only the appearance value itself changes with θ.
+    """
+    return float(mean) * float(rng.uniform(1.0 - rel, 1.0 + rel))
+
+
 @dataclass
 class LayerCal:
     """Per-layer optics + thickness, either seeded from literature or measured."""
@@ -55,14 +66,21 @@ class CalibrationProfile:
 
     layers: list                       # list[LayerCal]
     boundary_sharpness_um: float = 8.0     # softer inter-layer transitions (averaged-data look)
-    curvature_radius_um: float = 37500.0   # near-fovea radius (concave-up bowl)
-    curvature_sag_max_um: float = 520.0    # saturating peripheral rise
+    curvature_radius_um: float = 12000.0   # apex radius of curvature (~globe radius)
+    curvature_sag_max_um: float = 1800.0   # depth-window overflow guard (not a shape knob)
+    curvature_conic: float = 0.0           # conic constant K (0=sphere, <-1 flattens periphery)
     curvature_concave: bool = True         # True = posterior-pole bowl (center deepest)
     pit_radius_um: float = 700.0
     pit_radius_std_um: float = 110.0
     onl_bulge: float = 0.55
     choroid_contrast: float = 0.32         # subtle choroidal lucencies (averaged-data look)
     backscatter_gain: float = 1.0          # maps relative reflectivity -> sim amplitude
+    # --- appearance fields the optimizer tunes (per-eye jitter drawn around these means) ---
+    texture_contrast: float = 0.23         # slow intra-layer mottling depth (mean; RetinaModel jitters)
+    interface_jitter: float = 0.30         # lateral break-up of specular interfaces (mean)
+    vitreous_backscatter: float = 5.0e-4   # faint vitreous fill above the ILM (mean)
+    directional_strength: float = 0.60     # 0 = isotropic; scales Stiles-Crawford + Henle (mean)
+    speckle_shape: float | None = None     # K-dist effective #scatterers M; None = fully-developed Rayleigh
     n_scans: int = 0                       # provenance: how many real B-scans were averaged
     source: str = "literature"
 
@@ -338,6 +356,10 @@ def average_profiles(profiles: list) -> CalibrationProfile:
         pit_radius_std_um=float(np.std([p.pit_radius_um for p in profiles])),
         onl_bulge=m("onl_bulge"), choroid_contrast=m("choroid_contrast"),
         backscatter_gain=m("backscatter_gain"), n_scans=len(profiles),
+        curvature_conic=float(np.mean([getattr(p, "curvature_conic", 0.0) for p in profiles])),
+        speckle_shape=(None if all(getattr(p, "speckle_shape", None) is None for p in profiles)
+                       else float(np.mean([p.speckle_shape for p in profiles
+                                           if getattr(p, "speckle_shape", None) is not None]))),
         source=f"measured:{len(profiles)} scans")
 
 
@@ -414,7 +436,7 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
                                    amp_um=float(np.clip(shape.undulation_rms_um * 1.1, 2.0, 9.0)),
                                    corr_um=float(rng.uniform(350.0, 600.0)))
     from .anatomy.retina import _texture_fields
-    texture_contrast = float(rng.uniform(0.16, 0.30))
+    texture_contrast = _eye_jitter(rng, optics.texture_contrast)
     mottle_field, choroid_field = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
@@ -425,10 +447,12 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
         disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
         onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
         onh_radius_um=float(rng.uniform(700.0, 1000.0)),
-        texture_contrast=texture_contrast, interface_jitter=float(rng.uniform(0.20, 0.40)),
-        vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
-        directional_strength=float(rng.uniform(0.45, 0.75)),
+        texture_contrast=texture_contrast, interface_jitter=_eye_jitter(rng, optics.interface_jitter),
+        vitreous_backscatter=_eye_jitter(rng, optics.vitreous_backscatter),
+        directional_strength=float(np.clip(_eye_jitter(rng, optics.directional_strength), 0.0, 1.0)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
+        speckle_shape=optics.speckle_shape,   # pass the mean directly: no rng draw => label map invariant
+        curvature_conic=float(getattr(optics, "curvature_conic", 0.0)),
         mottle_field=mottle_field, choroid_field=choroid_field,
         data_thickness=data_thick, data_ecc_um=shape.ecc_grid_um, vessels=vessels)
 
@@ -490,4 +514,6 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         directional_strength=float(rng.uniform(0.45, 0.75)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
+        speckle_shape=profile.speckle_shape,   # mean directly: no rng draw => label map invariant
+        curvature_conic=float(getattr(profile, "curvature_conic", 0.0)),
         vessels=vessels)
