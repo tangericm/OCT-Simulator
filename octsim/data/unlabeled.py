@@ -48,6 +48,19 @@ class TextureProfile:
     total_retina_um_std: float
     curvature_concave_frac: float        # fraction of scans whose RPE is concave-up (a bowl)
     intensity_hist: list = field(default_factory=list)   # 32-bin normalised tissue histogram
+    #: un-normalised inter-layer contrast — dB range of the column-averaged (speckle-reduced)
+    #: ILM→RPE profile. The percentile-normalised stats above are contrast-BLIND, so this is the
+    #: only statistic that pins the layer brightness DYNAMIC RANGE (keeps the sim from over-boosting
+    #: layer contrast). 0.0 = not measured (older bundled profiles); the distance skips it then.
+    retinal_contrast_db: float = 0.0
+    #: normalized depth-intensity envelope: mean linear intensity in 8 slabs from the ILM down into
+    #: the choroid, peak-normalized so the SHAPE (sensitivity roll-off + deep tissue attenuation)
+    #: survives. The other stats stop at the RPE and are percentile-normalized, so they cannot see the
+    #: deep fade. [] = not measured (older profiles); the falloff distance term skips it then.
+    depth_intensity_env: list = field(default_factory=list)
+    #: FOV-normalized RPE curvature coefficient (µm sag per (mm half-width)²) — the bowl steepness,
+    #: comparable across fields-of-view. 0.0 = not measured; the curvature distance term skips it then.
+    rpe_curvature_coef: float = 0.0
     n_images: int = 0
     source: str = "unlabeled"
 
@@ -157,30 +170,55 @@ def _normalize(img):
     return np.clip((img - lo) / (hi - lo), 0.0, 1.0)
 
 
-def _detect_ilm_rpe(img, smooth=7, axial_pitch_um=3.87, max_retina_um=520.0, border=10):
-    """Column-wise ILM (tissue onset) and RPE (brightest outer-retinal band), or (None, None).
+def _detect_ilm_rpe(img, smooth=7, axial_pitch_um=3.87, max_retina_um=900.0, border=10,
+                    dc_skip=18):
+    """Column-wise ILM (tissue onset) and RPE (deepest bright outer band), or (None, None).
 
-    The RPE search is capped at ``max_retina_um`` below the ILM so a bright image-border
-    artifact (common in these display TIFFs) is never mistaken for the RPE; ``border`` rows are
-    trimmed top and bottom first.
+    Two failure modes on these Topcon recons are handled explicitly:
+
+    * a bright **DC / zero-delay band** at the very top (the device crops it, our recon does not)
+      would otherwise be picked as the ILM — the first ``dc_skip`` rows are ignored and the ILM is
+      the first onset ABOVE a per-column vitreous baseline, not the first bright pixel;
+    * the RPE is the **deepest** strong band, not the brightest thing in a shallow window — a search
+      capped too shallow lands on the inner plexiform/outer-nuclear complex instead. The window now
+      spans the full plausible retina (``max_retina_um``) and picks the deepest peak whose height is
+      within ``rpe_rel`` of the column max, so the true outer complex is found even when an inner
+      band is locally brighter.
     """
     H, W = img.shape
-    top, bot = border, H - border
+    top, bot = border + dc_skip, H - border
+    if bot - top < 30:
+        return None, None
     k = np.ones(smooth) / smooth
     col = np.apply_along_axis(lambda v: np.convolve(v, k, "same"), 0, img)
     max_th = int(max_retina_um / axial_pitch_um)
+    rpe_rel = 0.55                                             # RPE peak must be >=55% of column max
     ilm = np.full(W, -1); rpe = np.full(W, -1)
     for c in range(W):
         v = col[top:bot, c]
-        thr = 0.35 * v.max()
-        above = np.where(v > thr)[0]
-        if above.size < 5:
+        if v.size < 10:
             continue
-        ilm[c] = above[0] + top
-        lo = ilm[c] + max(12, int(0.5 * max_th))              # RPE is the deep outer band
+        # vitreous baseline = low quantile of the (DC-skipped) column; ILM = onset above it
+        base = float(np.percentile(v, 20)); cmax = float(v.max())
+        if cmax - base < 1e-3:
+            continue
+        thr_ilm = base + 0.30 * (cmax - base)
+        # sustained onset: the ILM begins a thick bright band, so require the next few rows to stay
+        # bright too — rejects isolated DC/vitreous speckle spikes above the true tissue surface
+        run = 6
+        cs = np.cumsum(np.concatenate([[0.0], (v > thr_ilm).astype(float)]))
+        sustained = np.where(cs[run:] - cs[:-run] >= run)[0]
+        if sustained.size == 0:
+            continue
+        ilm[c] = sustained[0] + top
+        lo = ilm[c] + 10
         hi = min(ilm[c] + max_th, bot)
-        if hi > lo + 2:
-            rpe[c] = lo + int(np.argmax(col[lo:hi, c]))
+        seg = col[lo:hi, c]
+        if seg.size < 6:
+            continue
+        thr_rpe = rpe_rel * cmax
+        strong = np.where(seg > thr_rpe)[0]                   # deepest strong band = RPE / Bruch's
+        rpe[c] = lo + int(strong[-1] if strong.size else int(np.argmax(seg)))
     good = (ilm >= 0) & (rpe > ilm + 10)
     if good.sum() < 0.4 * W:
         return None, None
@@ -204,12 +242,16 @@ def extract_texture(images, *, axial_pitch_um=3.87, lateral_pitch_um=6.0,
     """Aggregate a :class:`TextureProfile` over an iterable of grayscale B-scans."""
     axis = np.linspace(0.0, 1.25, N_TEMPLATE)
     templates, contrasts, hetero, thick, noise, concave = [], [], [], [], [], []
-    ax_grain, lat_grain, hists = [], [], []
+    ax_grain, lat_grain, hists, contrast_db = [], [], [], []
+    depth_env, rpe_curv = [], []
     n = 0
     for raw in images:
         img = _normalize(raw)
         if img is None:
             continue
+        raw_arr = np.asarray(raw, float)              # for the un-normalised contrast (dB if <0)
+        raw_lin = (10.0 ** (raw_arr / 20.0) if raw_arr.min() < -1.0
+                   else np.clip(raw_arr, 1e-6, None))
         ilm, rpe = _detect_ilm_rpe(img, axial_pitch_um=axial_pitch_um)
         if ilm is None:
             continue
@@ -229,6 +271,20 @@ def extract_texture(images, *, axial_pitch_um=3.87, lateral_pitch_um=6.0,
             continue
         tpl /= m
         templates.append(tpl)
+        # 1b) un-normalised layer-mean contrast: dB range of the column-averaged (speckle-reduced)
+        #     ILM->RPE profile — pins the layer brightness DYNAMIC RANGE (percentile norm hides it)
+        prof_lin = np.zeros(N_TEMPLATE); mc = 0
+        for c in range(0, W, 2):
+            a, b = ilm[c], rpe[c]
+            if b - a < 12:
+                continue
+            prof_lin += np.interp(a + axis * (b - a), np.arange(H), raw_lin[:, c]); mc += 1
+        if mc:
+            prof_lin /= mc
+            ret = prof_lin[axis <= 1.0]               # ILM→RPE only (exclude the bright choroid margin,
+            if ret.size:                              # else the choroid dilutes the layer contrast)
+                pk = float(ret.max()); fl = max(float(ret.min()), pk * 1e-4)
+                contrast_db.append(20.0 * np.log10(pk / fl))
         # 2) speckle contrast + heterogeneity within the retina
         band = np.concatenate(band_vals)
         band = band[band > 0.05]
@@ -240,12 +296,31 @@ def extract_texture(images, *, axial_pitch_um=3.87, lateral_pitch_um=6.0,
         xc = np.arange(W) - W / 2
         a2 = np.polyfit(xc, rpe, 2)[0]                     # RPE parabola curvature
         concave.append(1.0 if a2 < 0 else 0.0)            # rows increase downward: a<0 = bowl
+        # FOV-normalized RPE sag (µm per (mm half-width)²): the bowl steepness comparable across FOVs.
+        # SIGNED (keeps a2's sign) so D_curve penalises a dome-vs-bowl or over/under-curve mismatch, not
+        # just magnitude; rows increase downward, so a2<0 = concave-up bowl (real posterior pole).
+        fov_mm = W * lateral_pitch_um / 1000.0
+        sag_um = a2 * (W / 2.0) ** 2 * axial_pitch_um
+        rpe_curv.append(sag_um / ((fov_mm / 2.0) ** 2 + 1e-9))
         vit = img[:int(np.median(ilm)) - 5] if np.median(ilm) > 8 else img[:3]
         noise.append(float(np.median(vit)) if vit.size else 0.0)
         # 4) speckle grain via autocorrelation of a mid-retina patch
         ax_g, lat_g = _grain(img, ilm, rpe, axial_pitch_um, lateral_pitch_um)
         if ax_g:
             ax_grain.append(ax_g); lat_grain.append(lat_g)
+        # 5) depth-intensity envelope: 8 slabs from the ILM down into the choroid, on LINEAR raw
+        #    intensity, peak-normalized per image so the fall-off SHAPE (roll-off + deep attenuation)
+        #    survives. Extends PAST the RPE (unlike the ILM→RPE template) to capture the deep fade.
+        N_SLABS, slab_um = 8, 90.0
+        env = np.zeros(N_SLABS); me = 0
+        for c in range(0, W, 2):
+            rows = ilm[c] + (np.arange(N_SLABS) + 0.5) * slab_um / axial_pitch_um
+            if rows[-1] >= H:
+                continue
+            env += np.interp(rows, np.arange(H), raw_lin[:, c]); me += 1
+        if me:
+            env /= me
+            depth_env.append((env / (env.max() + 1e-9)).tolist())
         n += 1
 
     if not templates:
@@ -262,6 +337,9 @@ def extract_texture(images, *, axial_pitch_um=3.87, lateral_pitch_um=6.0,
         noise_floor_frac=float(np.median(noise)) if noise else 0.05,
         total_retina_um_mean=float(np.mean(thick)), total_retina_um_std=float(np.std(thick)),
         curvature_concave_frac=float(np.mean(concave)) if concave else 0.5,
+        retinal_contrast_db=float(np.median(contrast_db)) if contrast_db else 0.0,
+        depth_intensity_env=(np.median(np.array(depth_env), axis=0).tolist() if depth_env else []),
+        rpe_curvature_coef=float(np.median(rpe_curv)) if rpe_curv else 0.0,
         intensity_hist=(np.median(np.array(hists), axis=0).tolist() if hists else []),
         n_images=n, source=f"{source} ({n} B-scans)")
 

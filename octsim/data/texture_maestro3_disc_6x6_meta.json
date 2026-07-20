@@ -1,0 +1,11 @@
+{
+  "snr_db_mean": 45.07921544964093,
+  "snr_db_std": 0.708733298921976,
+  "cnr_db_mean": 21.567025670613454,
+  "n_frames": 64,
+  "alines": 512,
+  "stride": 4,
+  "axial_pitch_um": 3.87,
+  "lateral_pitch_um": 5.86,
+  "folder": "M3_Disc_6x6mm"
+}

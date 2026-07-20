@@ -113,10 +113,17 @@ def test_wide_scan_shows_both_fovea_and_disc():
     x = np.linspace(0.0, 9000.0, 700)
     cross = m.cross_section(0.0, x)
     assert "canal" in cross.label_names                    # disc in view -> unified field
-    disc = int(np.argmin(np.abs(x - (3000.0 + 4760.0))))
-    para = int(np.argmin(np.abs(x - 4500.0)))              # between fovea and disc
+    disc_x = 3000.0 + 4760.0
+    disc = int(np.argmin(np.abs(x - disc_x)))
     ilm = cross.opt_b[0]
-    assert ilm[disc] > ilm[para] + 100.0                   # the disc is cupped (deeper)
+    # The disc is LOCALLY cupped (a central excavation). Check the cup against the average of the two
+    # peripapillary rims — the symmetric average cancels the global posterior-pole curvature (which now,
+    # realistically, lifts the mid-periphery ~0.9 mm at 9 mm FOV), isolating the true local dip.
+    rim_l = int(np.argmin(np.abs(x - (disc_x - 950.0))))
+    rim_r = int(np.argmin(np.abs(x - (disc_x + 950.0))))
+    rim_baseline = 0.5 * (ilm[rim_l] + ilm[rim_r])
+    assert ilm[disc] > rim_baseline + 100.0                # central excavation deeper than the rim
+    para = int(np.argmin(np.abs(x - 4500.0)))              # parafovea (RPE intact) for the BMO check
     rpe_i = cross.label_names.index("RPE")
     rpe_thick = cross.opt_b[rpe_i + 1] - cross.opt_b[rpe_i]
     assert rpe_thick[disc] < 0.3 * rpe_thick[para]         # RPE terminates at the BMO

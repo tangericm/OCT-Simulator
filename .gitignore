@@ -14,6 +14,10 @@ output/
 *.tiff
 *.npy
 
+# Calibration experiment artifacts (regenerable; the accepted fitted optics JSONs in
+# octsim/data/retina_optics_*.json are the committed results). Raw data never committed.
+runs/
+
 # Raw OCT datasets (large; NOT redistributed — fit a shape model, commit the .npz)
 *.mat
 *.zip
