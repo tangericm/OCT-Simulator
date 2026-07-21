@@ -294,12 +294,19 @@ class RenderSpec:
     fda_pitch_ratio: float = 1.56 / 2.6
     fda_sigma: tuple = (1.0, 0.8)
     fda_axial_pitch_um: float = 2.6
+    # Optical depth of the anterior retinal surface (ILM) in the axial window. Real Maestro B-scans
+    # place the retina MID-window (~500-1300 µm ILM, operator-centered), not at the very top; 550 µm
+    # centers the sim retina in that range for a fair visual comparison. Depth-INVARIANT to the
+    # objective (percentile-normalized + ILM-anchored), so it never perturbs the fit — purely the
+    # displayed acquisition position.
+    sample_depth_um: float = 550.0
 
     def config(self, glob: RenderGlobals) -> SimConfig:
         volume = self.volume_frames > 1
         return SimConfig(
             anatomy=self.anatomy, shape_model=self.shape_model, optics_profile="__override__",
             instrument=self.instrument, center_wavelength_nm=self.center_wavelength_nm,
+            sample_depth_um=self.sample_depth_um,
             pixels_per_spectrum=self.pixels_per_spectrum, lines_per_frame=self.lines_per_frame,
             lateral_fov_um=self.lateral_fov_um, averages=self.averages,
             reference_amp=glob.reference_amp, falloff_6db_um=glob.falloff_6db_um,
