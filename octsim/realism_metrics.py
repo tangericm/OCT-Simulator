@@ -168,7 +168,15 @@ def find_rpe(db: np.ndarray, dz_um: float = 1.0, skip_um: float = DC_SKIP_UM) ->
     sm = _gaussian_filter(lin, (max(6.0 / dz_um, 1.0), 3.0))
     n = sm.shape[0]
 
-    max_shift = int(round(700.0 / dz_um))
+    # The lag window has to stay UNAMBIGUOUS. The correlation below is circular, so lag L
+    # and lag L-n are the same array element; the two slices that re-centre it overlap as
+    # soon as 2*max_shift+1 > n, and every lag in the overlap then appears twice. argmax
+    # returns the earlier copy, i.e. the negative alias — a genuine +125 px sag is reported
+    # as -260 px, which corrupts the RPE curve, the flattening, and every geometry metric
+    # derived from them. Measured on a synthetic 500-row frame at 2 µm/px with 250 µm of
+    # sag: 375 px of error (≈ the full searchable depth) before this clamp, 12 px after.
+    # Deep frames are unaffected — Maestro-like geometry never reaches the bound.
+    max_shift = min(int(round(700.0 / dz_um)), max((n - 1) // 2, 1))
     prof = sm.mean(axis=1)
     shifts = np.zeros(n_x)
     for _ in range(2):

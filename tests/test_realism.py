@@ -106,6 +106,66 @@ def test_directional_reflectance_fades_photoreceptors_but_not_rpe():
     assert m0.cross_section(0.0, x, 1050.0).layer_directional is None
 
 
+def _synthetic_bowl(n_depth, dz_um, sag_um, n_x=256, seed=0):
+    """A B-scan with a known curvature sag: vitreous, inner retina, EZ/RPE, choroidal tail."""
+    rng = np.random.default_rng(seed)
+    z = np.arange(n_depth) * dz_um
+    sag = sag_um * (1.0 - np.cos(np.linspace(-1.2, 1.2, n_x))) / (1.0 - np.cos(1.2))
+    cols = np.empty((n_depth, n_x))
+    for c in range(n_x):
+        s = sag[c]
+        cols[:, c] = (0.02
+                      + 0.30 * np.exp(-0.5 * ((z - (300 + s)) / 40.0) ** 2)
+                      + 1.00 * np.exp(-0.5 * ((z - (430 + s)) / 12.0) ** 2)
+                      + 0.55 * np.exp(-0.5 * ((z - (465 + s)) / 12.0) ** 2)
+                      + 0.20 * np.exp(-(z - (500 + s)) / 120.0) * (z > 500 + s)
+                      ) * (1.0 + 0.05 * rng.standard_normal(n_depth))
+    return 20.0 * np.log10(np.maximum(cols, 1e-6)), sag / dz_um
+
+
+def test_rpe_curve_survives_a_shallow_frame():
+    """The RPE lag search must not alias on frames too shallow for its ±700 µm window.
+
+    The correlation is circular, so lag L and L-n are the same element. Before the window
+    was clamped, a 500-row frame at 2 µm/px (n=385 searchable, ±350 window) reported a
+    genuine +125 px sag as a ~-260 px lag — 375 px of error, which is the whole frame.
+    Deep frames never reach the bound, so this only ever showed up on display-domain data.
+    """
+    from octsim import realism_metrics as rmet
+    for n_depth, dz, sag_um in [(1024, 3.87, 480.0),   # Maestro-like: window not reached
+                                (640, 3.00, 300.0),    # OCTA-500-like
+                                (500, 2.00, 250.0),    # shallow: the aliasing case
+                                (500, 2.00, 400.0)]:
+        db, true_shift = _synthetic_bowl(n_depth, dz, sag_um)
+        rows = rmet.find_rpe(db, dz)
+        err = np.max(np.abs((rows - np.median(rows)) - (true_shift - np.median(true_shift))))
+        assert err < 15.0, (n_depth, dz, sag_um, err)
+
+
+def test_every_retina_path_has_a_choroidal_vessel_bed():
+    """`ChoroidVasculature` is a list of lumens, so an unset list means a FLAT choroid.
+
+    The field it replaced (`ChoroidTexture`) generated its own random field when none was
+    supplied, so leaving it unset used to be harmless. Only `random_retina` and
+    `retina_from_shape_model` populate it explicitly; previews, the calibrated-profile path
+    and hand-built models rely on the fallback.
+    """
+    from octsim.anatomy.retina import RetinaModel, default_retina, random_retina
+    from octsim.calibration import literature_profile, retina_from_profile
+    models = {
+        "default_retina": default_retina(lateral_fov_um=6000.0),
+        "random_retina": random_retina(np.random.default_rng(0), lateral_fov_um=6000.0),
+        "direct": RetinaModel(),
+        "from_profile": retina_from_profile(literature_profile(), np.random.default_rng(1),
+                                            lateral_fov_um=6000.0),
+    }
+    for name, m in models.items():
+        assert m.choroid_lumens, f"{name} has no choroidal vessel bed"
+    # the fallback must be reproducible: previews and tests render the same choroid twice
+    assert ([l.x0_um for l in RetinaModel().choroid_lumens]
+            == [l.x0_um for l in RetinaModel().choroid_lumens])
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
