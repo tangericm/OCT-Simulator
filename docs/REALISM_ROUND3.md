@@ -516,10 +516,14 @@ metric vector — the *judge* — not against `calibrate.D`, the objective the f
 which carries a `D_falloff` term built specifically to identify deep attenuation. So the
 honest statement is not "the fit cannot move `at_outer`/`at_choroid`" but "**nothing in the
 gate set can tell whether it moved them correctly**", which is the overfitting shape this
-whole round is about. An attempt to walk the same direction through `calibrate.evaluate`
-returned `D_total ≈ 222` where the accepted multi-corpus fit records ≈ 3.4, i.e. the
-RenderSpec/target pairing was wrong — that probe is not reported, and reproducing the
-fitting session's exact anchor is a prerequisite for the objective-side half of this.
+whole round is about.
+
+*(Corrected: an earlier note here claimed a `D_total ≈ 222` reading proved a misconfigured
+RenderSpec/target pairing, because §CALIBRATION_ROUTINE records a fit going 12.93 → 3.40.
+It does not. `scripts/calibrate_optics.py --target maestro3_macula --instrument maestro3
+--mode baseline` reports **`D(literature) = 222.11`** — the same number. D is not on a
+common scale across targets; the 12.93 → 3.40 figures are the **pooled multi-corpus** loop
+in `iterate_loop.py`, a different objective. There is no anchor bug.)*
 
 **What R1 should do**, superseding the struck-through text: fit `bs_NFL`, `bs_inner`,
 `bs_ONL` and `at_inner` — the four dimensions that are both visible and mutually
@@ -528,6 +532,61 @@ instead of fitting them. Quote per-layer µ only for bands whose Jacobian column
 resolvable, and say so plainly for the rest rather than reporting a fitted number. Note
 also that `speckle_decorrelation` has to join the free set (§0a): it trades directly
 against `inner_swing_db`, which is one of the metrics this fit moves.
+
+#### R1b — the fit, and why its first run was meaningless
+
+Running the constrained fit R1a prescribed (`bs_NFL`, `bs_inner`, `bs_ONL`, `at_inner` free;
+outer complex and choroid held) at the driver's default 256 A-lines took D from 222.11 to
+5.20 — a 97.7 % improvement — and produced **unphysical attenuation**:
+
+| layer | µ literature | µ fitted | published |
+|---|---|---|---|
+| NFL | 4.50 | **11.48** | 3.0–6.0 |
+| GCL | 1.60 | **4.08** | 1.0–3.0 |
+| IPL | 3.00 | **7.66** | 2.0–4.5 |
+| INL | 1.50 | **3.83** | 1.0–3.0 |
+| OPL | 3.00 | **7.66** | 2.0–4.5 |
+
+Five of six layers out of range, with backscatter compensating downward (`bs_inner` ×0.38,
+`bs_NFL` ×0.50) — the µ↔backscatter trade R1a measured, now demonstrated end to end. R1's
+success criterion (a) fails outright.
+
+**The cause is not the layer model. The objective was 99 % sampling artifact.** Decomposing
+D at literature θ:
+
+| speckle sub-term | target | synth | relerr² |
+|---|---|---|---|
+| speckle_contrast | 0.3319 | 0.3321 | 0.000 |
+| axial_grain_um | 65.79 | 89.01 | 0.125 |
+| **lateral_grain_um** | **5.86** | **164.71** | **734.9** |
+| heterogeneity | 0.0162 | 0.0261 | 0.368 |
+| total_retina_um_mean | 560.2 | 502.5 | 0.011 |
+
+`D_speckle` is 220.6 of the total 222.1, and `lateral_grain_um` is 99.7 % of *that*. The fit
+renders at **256 A-lines (dx = 23.4 µm)** while the target was measured on the real corpus at
+**1024 A-lines (dx = 5.86 µm)** — a physical length compared across mismatched sampling.
+This is the **same defect class as §0a, in the objective rather than the judge.** Rendering
+at the target's own pitch, with no parameter change whatsoever:
+
+| lines | dx µm | synth grain | D_total | D_speckle |
+|---|---|---|---|---|
+| 256 | 23.44 | 164.71 | **222.11** | 220.63 |
+| 512 | 11.72 | 11.74 | 2.29 | 0.696 |
+| 1024 | 5.86 | 5.87 | **1.69** | 0.012 |
+
+**131× lower, for free.** At matched pitch the literature layer table already reproduces the
+target's lateral grain to 5.87 vs 5.86 µm — which is R0a's fix showing up in the objective.
+
+Two consequences worth stating plainly. First, the fitted µ above is chasing an artifact, so
+it should not be adopted; `octsim/data/retina_optics_r1b.json` is written but must not be
+promoted. Second, and much more importantly: **the accepted fits recorded in
+`CALIBRATION_ROUTINE.md` were run at 256 lines**, so the "pooled mean D 12.93 → 3.40" result
+was obtained against an objective dominated by the same artifact, and every parameter those
+runs moved was partly compensating for it. Re-run before trusting any of it.
+
+Checked and ruled out: this is **not** something R0a introduced. The pre-R0 commit
+(`e8141fd`) reports `D(literature) = 222.19` against 222.11 now — the objective has always
+been dominated this way.
 
 Success criterion: per-layer µ in 1/mm that is (a) within range of published values and
 (b) **improves the held-out score**, not just the training score.
@@ -559,6 +618,35 @@ Still too uniform, and it is the most visible remaining anatomy gap. In payoff o
 prelaminar **texture** (currently a smooth exponential fade — needs its own mottling field
 and a laterally varying lamina insertion depth), nasal/temporal **asymmetry** (the model is
 radially symmetric in `r_disc`), **BMO overhang lip**, and optional peripapillary atrophy.
+
+**Promoted to the top of R3 (2026-07-26, from a side-by-side review): the RPE band does not
+terminate at the BMO, it dives into the cup.** Reported as "the RPE just disappears into the
+nerve pit", and it is a geometry bug, not a texture one. Measured on an `anatomy="onh"`
+cross-section, the RPE boundary spans **1763 µm** across one frame — 644 µm at the temporal
+edge, ~1230 µm at the disc margin, and **2407 µm inside the disc** — while its *thickness*
+correctly goes to zero at the BMO.
+
+Cause: `opt_b` is strictly cumulative from `opt_b[0]`, and `opt_b[0]` carries the `cup`
+excavation (`_field_cross_section`, `retina.py:~700`). A layer terminated at the BMO
+therefore still has its boundary deposited, at the cup floor rather than at its own depth,
+and everything below it (BMCC, choroid) is dragged from ~670 µm to ~2408 µm with it. Real
+anatomy is the opposite: Bruch's terminates at the opening *at its own depth* and the canal
+opens beneath it.
+
+Half of the visible artifact is fixed (`octsim/sample.py`): interfaces were deposited
+unconditionally at `opt_b[i]`, so all ~10 terminated layers laid their Fresnel lines into
+the same depth bin and summed coherently into a bright wedge tracing the cup floor. An
+interface amplitude is now scaled by `clip(optical_thickness / dz, 0, 1)` — a layer thinner
+than the depth pixel presents no resolvable interface, and one of zero thickness presents
+none at all, because its neighbours are in contact. The comment already in that code
+acknowledged the coherent-stacking hazard and mitigated it by dimming; dimming was not
+enough.
+
+The remaining half is the positional fix and is genuinely R3-scale: the cup must excavate
+the inner surface only, with the outer complex anchored at its own depth. Note the geometry
+is not trivial — measured cup depth (560–900 µm optical) exceeds the retina's whole optical
+thickness (~380 µm), so the cup floor is legitimately posterior to the BMO plane and the
+canal fill has to span that gap. `runs/compare_onh.py` renders the comparison.
 
 ### R4. `octsim/device_raw.py` — the OCT Denoiser bridge · **M**
 
@@ -670,7 +758,14 @@ command, so run it with holdouts or not at all.
 - Real inner retina is brighter relative to the outer complex than sim, by ~4 dB in the
   A-line overlay. Now has a number: `band_above_floor_db.onl` is +4.1 dB in sim (§0c).
 - Real choroid has more vertical striation than sim's rounder lumens. Now has a number:
-  `choroid_dark_frac_4db` 0.004 real vs 0.049 sim (§0c).
+  `choroid_dark_frac_4db` 0.004 real vs 0.031 sim, gated and waived (§0c). **Confirmed
+  independently by eye in a 2026-07-26 side-by-side review** ("the choroid still looks very
+  strange"), and R1a explains why it has survived every fit: `bs_choroid` and `at_choroid`
+  are the two least identifiable dimensions in the whole parameter set, so no fit has ever
+  had a reason to correct it and no gate could have caught it. **This one cannot be fitted —
+  it needs a structural change to the vasculature model** (vertical striation rather than
+  round separated lumens), plus a gate that can see the difference. `choroid_dark_frac_4db`
+  is now that gate.
 - ONH interior too uniform (→ R3).
 - **Sim retina sits ~60 µm shallower than real** on the training corpus — `ilm_row` −18.1
   and `rpe_row` −14.8 rows at 3.87 µm/px, moving together, so it is a placement offset

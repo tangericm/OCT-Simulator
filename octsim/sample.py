@@ -209,7 +209,20 @@ def build_reflectivity_from_boundaries(
             r_if = (n_above - layer_n[i]) / (n_above + layer_n[i])
         if abs(r_if) > 1e-6:
             bins = np.clip(np.round(opt_b[i] / dz).astype(np.intp), 0, n_depth - 1)
-            amp = r_if * np.exp(-cum_mu)
+            # A layer thinner than the depth pixel presents no RESOLVABLE interface, and a
+            # layer of zero thickness presents none at all — its neighbours are in contact,
+            # so the physical boundary is theirs, not one each.
+            #
+            # Without this, every layer terminated at the optic disc still deposits its
+            # Fresnel line. Inside the disc their boundaries have all collapsed to the same
+            # depth (the stack is cumulative from the cup-excavated ILM), so ~10 lines land
+            # in one depth bin and sum coherently into a bright wedge tracing the cup floor:
+            # the RPE appears to dive into the nerve pit instead of terminating at Bruch's
+            # membrane opening, which is what a real disc B-scan shows. Dimming the
+            # interfaces was the earlier mitigation; it did not remove the wedge.
+            thick_opt = np.abs(opt_b[i + 1] - opt_b[i])
+            resolvable = np.clip(thick_opt / max(dz, 1e-9), 0.0, 1.0)
+            amp = r_if * np.exp(-cum_mu) * resolvable
             if interface_jitter > 0:  # break the too-perfect lateral coherence
                 amp = amp * (1.0 + interface_jitter * _smooth1d(n_x, rng, 90.0 / dx_um))
                 amp = amp * np.exp(1j * (0.4 * interface_jitter) * _smooth1d(n_x, rng, 60.0 / dx_um))
