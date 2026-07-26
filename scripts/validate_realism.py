@@ -13,6 +13,13 @@ Reconstructs a real Maestro corpus and renders matched simulated frames through 
 Real and simulated frames are rendered on the same depth pitch (the Maestro3 instrument
 model gives 3.87 µm/px at 2048 spectral samples), so band offsets in optical µm land on
 the same tissue in both.
+
+Exit status (the held-out corpora count — a cross-device regression must not exit 0)::
+
+    0  every requested corpus was evaluated and every gate passed
+    1  a gate failed, training or held-out
+    2  all evaluated gates passed but a requested --holdout could not be loaded, so the
+       generalization claim went unchecked
 """
 
 from __future__ import annotations
@@ -141,12 +148,14 @@ def main() -> int:
 
     # --- held-out corpora: same metric code, no refitting -----------------------------
     holdouts = {}
+    skipped = []
     for name in a.holdout:
         try:
             imgs, spec = display_domain.load_holdout(name, a.data_root,
                                                      limit=a.frames, stride=a.stride)
         except Exception as exc:
             print(f"\nholdout {name}: SKIPPED ({exc})")
+            skipped.append(name)
             continue
         dz, dx, tier = spec["dz"], spec["dx"], spec["tier"]
         drop = set()
@@ -185,6 +194,7 @@ def main() -> int:
         hp = sum(1 for r in hg if r[7])
         print(f"  gates: {hp}/{len(hg)} passing   [GENERALIZATION]")
         holdouts[name] = {"tier": tier, "alines": alines_h,
+                          "n_pass": hp, "n_gated": len(hg),
                           "rows": [{"metric": r[0], "real": r[1], "sim": r[3],
                                     "delta": r[5], "tol": r[6], "pass": r[7]}
                                    for r in h_rows]}
@@ -201,7 +211,28 @@ def main() -> int:
                 "holdouts": holdouts,
             }, f, indent=1)
         print(f"wrote {a.json}")
-    return 0 if n_pass == len(gated) else 1
+
+    # Exit status has to cover the HELD-OUT corpora too. Reporting only the training score
+    # means a cross-device regression — the exact failure this command exists to catch —
+    # still exits 0, and any automation gating on it accepts the regression silently.
+    #
+    #   0  every requested corpus evaluated and every gate passed
+    #   1  a gate failed (training or held-out)
+    #   2  everything that ran passed, but a requested holdout could not be evaluated
+    #      (missing/unhydrated data). Distinct from 1: nothing is known to be broken, but
+    #      the generalization claim was NOT checked, so this must not read as success.
+    h_fail = {n: v for n, v in holdouts.items() if v["n_pass"] != v["n_gated"]}
+    print(f"\nSUMMARY  training {n_pass}/{len(gated)}"
+          + "".join(f"   {n} {v['n_pass']}/{v['n_gated']}" for n, v in holdouts.items())
+          + (f"   skipped: {', '.join(skipped)}" if skipped else ""))
+    if n_pass != len(gated) or h_fail:
+        if h_fail:
+            print(f"FAIL: held-out gates failed on {', '.join(sorted(h_fail))}")
+        return 1
+    if skipped:
+        print(f"INCOMPLETE: requested holdout(s) not evaluated: {', '.join(skipped)}")
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

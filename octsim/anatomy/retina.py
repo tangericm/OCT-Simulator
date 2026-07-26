@@ -105,6 +105,13 @@ CHOROID_SUBLAYERS = (
 )
 
 
+#: Fallback choroidal bed for models that do not supply one (see ``RetinaModel.__post_init__``).
+#: The lumen COUNT scales with the span, so drawing over a wide field keeps the per-mm density
+#: correct at any frame width; the field is only made wide enough to cover the largest scan.
+_FALLBACK_LUMEN_FOV_UM = 12000.0
+_FALLBACK_LUMEN_SEED = 0x0C40
+
+
 def random_choroid_lumens(rng, *, lateral_fov_um: float, y_span_um: float = 1400.0) -> list:
     """Draw a 3-D population of choroidal vessel lumens for one eye.
 
@@ -351,6 +358,21 @@ class RetinaModel:
     #: the choroid's own backscatter was lowered when this was switched on.
     ms_fraction: float = 0.025
     ms_length_um: float = 180.0
+
+    def __post_init__(self):
+        # The choroid used to be a smooth random field (`ChoroidTexture`), which generated
+        # its own noise when no explicit field was supplied. `ChoroidVasculature` is a list
+        # of discrete lumens instead, so an unset list is not "generate one" but "no vessels
+        # at all" — a flat choroid on every path that does not populate it: `default_retina`
+        # (previews/tests), `retina_from_profile` (the calibrated-profile path), and direct
+        # construction. Only `random_retina` and `retina_from_shape_model` set it explicitly.
+        #
+        # So fall back to a bed here rather than at the call sites, which also covers models
+        # built by hand. Seeded, because previews and tests must stay reproducible.
+        if self.choroid_lumens is None:
+            self.choroid_lumens = random_choroid_lumens(
+                np.random.default_rng(_FALLBACK_LUMEN_SEED),
+                lateral_fov_um=_FALLBACK_LUMEN_FOV_UM)
 
     def _landmarks(self):
         """Return ``(fovea_x, disc_x_or_None)`` for this scene in absolute enface x (µm)."""

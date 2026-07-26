@@ -236,10 +236,21 @@ class ChoroidVasculature:
 
         y = ctx.y_um
         e = max(self.edge_um, 1e-6)
+        x_lo, x_hi = (float(x[0]), float(x[-1])) if n_x else (0.0, 0.0)
+        if x_lo > x_hi:
+            x_lo, x_hi = x_hi, x_lo
         for lu in self.lumens:
             dy = abs(y - lu.y0_um)
             if dy >= lu.ry_um:
                 continue                                     # this B-scan misses the vessel
+            # Laterally off-frame lumens are EXACTLY a no-op, not an approximation: outside
+            # the wall the smoothstep saturates at 1 and the gain factor becomes
+            # lu.gain + (1 - lu.gain)*1 == 1. Skipping them is free correctness. It matters
+            # because the vessel bed is drawn over a field wide enough for any scan width,
+            # so on a 6 mm frame about half the y-surviving lumens contribute nothing and
+            # were still costing a full [n_band, n_x] multiply each.
+            if lu.x0_um + lu.rx_um <= x_lo or lu.x0_um - lu.rx_um >= x_hi:
+                continue
             # elliptical foreshortening: the in-plane cross-section of an ellipsoid
             shrink = np.sqrt(max(1.0 - (dy / lu.ry_um) ** 2, 0.0))
             rx = lu.rx_um * shrink
