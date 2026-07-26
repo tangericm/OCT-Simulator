@@ -1,5 +1,10 @@
 # octsim — audit findings & realism plan
 
+> **Superseded for planning purposes by [`REALISM_ROUND3.md`](REALISM_ROUND3.md).** This
+> file remains the record of the round-1 audit and the reasoning behind it; the current
+> priority list, the measured results of round 2, and the measurement traps to avoid are
+> in the round-3 document.
+
 Living record of the 2026-07 repo audit (40 adversarially-verified findings) and the
 retinal-OCT realism strategy (grounded in clinical-appearance research). Drives the
 fix batches. Update as items land.
