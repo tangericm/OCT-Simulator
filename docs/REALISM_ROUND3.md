@@ -452,8 +452,82 @@ metric code, iterate. `octsim/calibrate.py` already has the ANCHOR·FIT·JUDGE m
 
 Check identifiability per dimension before fitting it — µ and backscatter trade off within
 a thin layer, and the round-1 experience is that a 4-parameter toy fit already conflates
-adjacent outer bands at 512 px. Start with the layers that are thick and well-separated
-(NFL, ONL, choroid) and hold the outer complex fixed.
+adjacent outer bands at 512 px. ~~Start with the layers that are thick and well-separated
+(NFL, ONL, choroid) and hold the outer complex fixed.~~
+
+#### R1a — identifiability, measured 2026-07-26. Two corrections to this plan.
+
+Method: finite-difference the realism metric vector against each of the 9 band parameters
+under common random numbers, normalise every metric by the **real** corpus's frame-to-frame
+SD — so a direction counts to the extent the gates can actually see it — and take pairwise
+cosines of the Jacobian columns. `runs/probe_identifiability.py`.
+
+Sensitivity, in real-SD units per decade. This is how visible each parameter is *to the
+judge*:
+
+| | bs_NFL | bs_inner | bs_ONL | bs_outer | bs_choroid | at_inner | at_nuclear | at_outer | at_choroid |
+|---|---|---|---|---|---|---|---|---|---|
+| ‖∂m/∂θ‖ | 71 | 182 | 96 | 179 | **4.0** | 96 | 34 | 25 | **1.6** |
+
+Degenerate pairs, |cos| ≥ 0.9:
+
+| pair | cos |
+|---|---|
+| `bs_outer` vs `at_outer` | **−0.991** |
+| `bs_outer` vs `at_nuclear` | **−0.985** |
+| `at_nuclear` vs `at_outer` | **+0.973** |
+| `bs_choroid` vs `at_choroid` | **−0.898** |
+
+**Correction 1: the choroid is the worst starting point, not one of the best.** This
+paragraph proposed NFL, ONL and choroid as the thick, well-separated layers to fit first.
+NFL and ONL hold up — `bs_NFL` peaks at |cos| 0.36 against anything else, `bs_ONL` at 0.73.
+The choroid does not: its two parameters are 90 % degenerate with each other **and** they
+are the two least visible dimensions in the set, 45× and 114× weaker than `bs_inner`. A
+choroid fit converges to a confident number no gate can contradict.
+
+**Correction 2: `theta_space`'s freeze list is backwards.** It freezes `at_inner` and
+`at_nuclear` as "only weakly identifiable" while leaving `at_outer` and `at_choroid` free.
+Measured, `at_inner` is the *most* visible attenuation dimension (96) — more than the two
+that are actually fitted (25 and 1.6) combined — while `at_outer` is 99 % degenerate with
+`bs_outer` and `at_choroid` is nearly invisible. The fit spends its attenuation freedom
+almost entirely on directions the judge cannot see.
+
+The 9-parameter problem has condition number **389** (singular values 207 … 0.53), so two
+or three combinations are effectively unrecoverable. Fitting per-*layer* µ, which is what
+R1's headline asks for, would add 13 dimensions to a problem that cannot support 9.
+
+**The flat direction is almost pure choroid.** The smallest right-singular vector of the
+Jacobian is `at_choroid` −0.95, `bs_choroid` −0.29, everything else below 0.13. Walking it
+and comparing against the best-seen direction at the same step (`runs/probe_null2.py`):
+
+| step (decades) | ‖Δm‖ along the null direction | along the best direction | ratio |
+|---|---|---|---|
+| 0.10 | 0.07 | 21.4 | **304×** |
+| 0.20 | 0.27 | 41.5 | **151×** |
+| 0.40 | 0.32 | 78.0 | **245×** |
+
+Choroidal attenuation can be multiplied by **2.5×** and the whole gated realism vector moves
+by 0.32 SD units *in total, across 23 metrics* — less than a third of one metric's
+frame-to-frame noise. Whatever a fit reports for the choroid, no gate in the harness can
+contradict it.
+
+**Caveat, stated because it bounds the claim.** This Jacobian is taken against the realism
+metric vector — the *judge* — not against `calibrate.D`, the objective the fit minimises,
+which carries a `D_falloff` term built specifically to identify deep attenuation. So the
+honest statement is not "the fit cannot move `at_outer`/`at_choroid`" but "**nothing in the
+gate set can tell whether it moved them correctly**", which is the overfitting shape this
+whole round is about. An attempt to walk the same direction through `calibrate.evaluate`
+returned `D_total ≈ 222` where the accepted multi-corpus fit records ≈ 3.4, i.e. the
+RenderSpec/target pairing was wrong — that probe is not reported, and reproducing the
+fitting session's exact anchor is a prerequisite for the objective-side half of this.
+
+**What R1 should do**, superseding the struck-through text: fit `bs_NFL`, `bs_inner`,
+`bs_ONL` and `at_inner` — the four dimensions that are both visible and mutually
+distinguishable — and hold the outer complex and the choroid at their literature values
+instead of fitting them. Quote per-layer µ only for bands whose Jacobian column is
+resolvable, and say so plainly for the rest rather than reporting a fitted number. Note
+also that `speckle_decorrelation` has to join the free set (§0a): it trades directly
+against `inner_swing_db`, which is one of the metrics this fit moves.
 
 Success criterion: per-layer µ in 1/mm that is (a) within range of published values and
 (b) **improves the held-out score**, not just the training score.
