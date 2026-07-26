@@ -588,6 +588,55 @@ Checked and ruled out: this is **not** something R0a introduced. The pre-R0 comm
 (`e8141fd`) reports `D(literature) = 222.19` against 222.11 now — the objective has always
 been dominated this way.
 
+##### Re-run at matched pitch: µ is not identifiable from this objective at any pitch
+
+Repeating the identical fit at 1024 A-lines, so the grain artifact is gone:
+
+| | 256 A-lines | 1024 A-lines |
+|---|---|---|
+| baseline D | 222.11 | 1.69 |
+| fitted D | 5.20 (−97.7 %) | 1.39 (−17.9 %) |
+| `at_inner` multiplier | **×2.55** | **×0.338** |
+| resulting NFL µ | **11.48** | **1.52** |
+
+Published NFL is 3.0–6.0. **The fitted attenuation flips from 2.5× too high to 3× too low
+on the same target, same free set, same optimiser — with only the render's A-line density
+changed.** A 7.5× swing in µ from a knob that is not a tissue property at all. That is the
+empirical confirmation of R1a's Jacobian: µ is not recoverable here, and any single fitted
+value would have looked perfectly plausible in isolation.
+
+Where the matched-pitch gain actually came from, decomposed:
+
+| term | literature | fitted | share of the gain |
+|---|---|---|---|
+| `D_curve` | 1.4231 | 1.2488 | **57.5 %** |
+| `D_hist` | 0.1875 | 0.0133 | **57.5 %** |
+| `D_falloff` | 0.0584 | 0.0521 | **2.1 %** |
+| `D_speckle` | 0.0121 | 0.0562 | −14.6 % (worse) |
+
+Two things follow. **`D_falloff` — the only term that carries attenuation information — is
+2.1 % of the improvement**, while at literature θ it is 3.5 % of the objective. The fit has
+essentially no incentive to get µ right, so it doesn't.
+
+And **`D_curve` is not intensity-blind, contrary to its docstring** ("GEOMETRIC term …
+intensity-blind => identifies R_eye only"). Four backscatter/attenuation multipliers reduced
+it by 0.174, because `rpe_curvature_coef` is estimated by locating the RPE in the rendered
+image, so changing layer brightness moves the landmark and hence the fitted curvature. The
+geometric term is being satisfied with photometric parameters — a wrong-lever coupling that
+is by itself enough to push µ out of range.
+
+**R1c, what has to happen before any per-layer µ is trustworthy:**
+
+1. Render the fit at the target corpus's own A-line pitch. Non-negotiable, and free.
+2. Take `D_curve` out of a layer-optics fit (fit `R_eye`/`curvature_conic` separately), and
+   fix or re-document the claim that it is intensity-blind — measured, it is not.
+3. Give the attenuation-carrying term real weight, or replace `D_falloff` with a per-layer
+   depth-slope residual. At 2.1 % of the gain it cannot identify anything.
+4. Regularise µ toward literature far harder than `w_reg = 0.05`, or constrain it from an
+   independent measurement rather than from the image.
+
+Neither fitted profile is adopted; `retina_optics_r1b.json` is untracked deliberately.
+
 Success criterion: per-layer µ in 1/mm that is (a) within range of published values and
 (b) **improves the held-out score**, not just the training score.
 
