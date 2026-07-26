@@ -146,6 +146,10 @@ def build_reflectivity_from_boundaries(
     vitreous_backscatter: float = 0.0,
     layer_directional: np.ndarray | None = None,
     boundary_sharpness_um: float = 0.0,
+    layer_sharpness_um: np.ndarray | None = None,
+    ms_fraction: float = 0.0,
+    ms_length_um: float = 120.0,
+    speckle_decorrelation: float = 0.0,
     texture_field: "CoherentField | None" = None,
     speckle: np.ndarray | None = None,
     k_shape: float | None = None,
@@ -172,6 +176,9 @@ def build_reflectivity_from_boundaries(
     backscatter_map = np.zeros((n_depth, n_x))
     cum_mu = np.zeros(n_x)                                  # per-column attenuation above layer i
     L = len(layer_n)
+    # per-pixel transition width, filled from each layer's own sharpness as we rasterise it
+    sharp_map = (np.full((n_depth, n_x), float(boundary_sharpness_um))
+                 if layer_sharpness_um is not None else None)
     for i in range(L):
         top_opt = opt_b[i][None, :]
         bot_opt = opt_b[i + 1][None, :]
@@ -189,6 +196,10 @@ def build_reflectivity_from_boundaries(
                 if layer_directional is not None:   # per-column directional reflectance
                     bmap_i = bmap_i * layer_directional[i][None, :]
                 backscatter_map[r0:r1][msk] = bmap_i[msk]
+                if sharp_map is not None:
+                    sub = sharp_map[r0:r1]
+                    sub[msk] = float(layer_sharpness_um[i])
+                    sharp_map[r0:r1] = sub
 
         r_if = layer_interface[i]
         if r_if is None:
@@ -227,7 +238,31 @@ def build_reflectivity_from_boundaries(
     # (a biological gradient beyond the axial PSF), not step functions. Smoothing the
     # deterministic amplitude MAP (not the speckle field) blurs the too-crisp band edges
     # while leaving speckle fully developed. Driven by a measured boundary width.
-    if boundary_sharpness_um > 0:
+    # A single global width is wrong on its face: inner-retinal reflectivity transitions
+    # really are gradual (8-12 µm), but the photoreceptor/RPE transitions are physically
+    # sub-micron. Blurring the whole map at the inner-retinal width washes the 11 µm dark
+    # outer-segment band into its bright neighbours, which is what collapses the EZ/RPE
+    # bimodality into one spike. ``layer_sharpness_um`` gives each layer its own width;
+    # the blur is then a per-pixel select between the (few) distinct widths in use.
+    if layer_sharpness_um is not None and sharp_map is not None:
+        try:
+            from scipy.ndimage import gaussian_filter1d
+        except Exception as exc:
+            raise RuntimeError("per-layer boundary sharpness requires SciPy") from exc
+        widths = sorted({float(w) for w in np.asarray(layer_sharpness_um, float)}
+                        | {float(boundary_sharpness_um)})
+        out = backscatter_map
+        for w in widths:
+            sig = w / dz
+            if sig <= 0.3:
+                blurred = backscatter_map
+            else:
+                blurred = gaussian_filter1d(backscatter_map, sig, axis=0, mode="nearest")
+            sel = sharp_map == w
+            if sel.any():
+                out = np.where(sel, blurred, out)
+        backscatter_map = out
+    elif boundary_sharpness_um > 0:
         sigma_px = boundary_sharpness_um / dz
         if sigma_px > 0.3:
             try:
@@ -236,6 +271,38 @@ def build_reflectivity_from_boundaries(
                                                     mode="nearest")
             except Exception:
                 pass
+
+    # --- multiple-scattering diffuse pedestal -----------------------------------------
+    # The forward model is first-Born single scattering (see octsim.forward), which cannot
+    # produce the diffuse tail real OCT shows beneath every strongly-scattering block: the
+    # measured mean A-line falls ~7 dB too fast through the choroid, and the deficit is
+    # largest directly under the dense inner-plexiform stack and under the RPE — the
+    # signature of missing multiple scattering rather than of a wrong backscatter value.
+    #
+    # Added in POWER, not amplitude, and before the speckle draw. That is the physically
+    # correct superposition: a diffuse, phase-randomised contribution is an INDEPENDENT
+    # circular-Gaussian, so its variance adds to the ballistic one. E[I] therefore adds
+    # while the field stays fully developed, and the K-modulator's E[tex]=1 invariant is
+    # untouched.
+    #
+    # The kernel is a causal exponential tail of length ``ms_length_um``, evaluated as a
+    # one-pass IIR recursion (O(n_depth·n_x)) rather than a convolution, plus a lateral
+    # blur for the transverse spread of a multiply-scattered path.
+    if ms_fraction > 0:
+        inten = backscatter_map ** 2
+        decay = float(np.exp(-dz / max(ms_length_um, 1e-6)))
+        acc = np.zeros(n_x)
+        ped = np.empty_like(inten)
+        for zi in range(n_depth):
+            acc = acc * decay + inten[zi] * (1.0 - decay)
+            ped[zi] = acc
+        try:
+            from scipy.ndimage import gaussian_filter1d
+            ped = gaussian_filter1d(ped, max(2.0 * beam_waist_um / dx_um, 1.0),
+                                    axis=1, mode="nearest")
+        except Exception:
+            pass
+        backscatter_map = np.sqrt(inten + ms_fraction * ped)
 
     # unit circular-complex-Gaussian speckle. For a volume the caller passes a field that is
     # CORRELATED across the slow axis (``speckle``), so adjacent frames share speckle instead of
@@ -285,7 +352,31 @@ def build_reflectivity_from_boundaries(
         for feat in features:
             feat.apply(r, ctx)
 
-    return _lateral_beam_filter(r, beam_waist_um / dx_um)
+    out = _lateral_beam_filter(r, beam_waist_um / dx_um)
+
+    # Per-A-line speckle decorrelation.
+    #
+    # Measured on the Maestro2 6 mm / 2048 A-line line scans (2.93 µm pitch, fine enough
+    # that the answer is not aliased by the sampling): real lateral speckle grain is
+    # 3-5 µm, while a 15 µm beam waist predicts ~14 µm and that is what the sim produced.
+    # The real instrument therefore decorrelates its speckle in ~1-2 A-lines, far faster
+    # than its optical spot — scan-during-integration, galvo jitter, and involuntary eye
+    # motion between successive A-lines all randomise the sub-resolution scatterer phases
+    # while the beam is still averaging the same tissue.
+    #
+    # So the fix is NOT to shrink beam_waist_um: that would falsify the instrument's real
+    # lateral resolution for actual structure (vessels, layer boundaries) in order to fix a
+    # statistic of the noise. Instead a fraction of the speckle power is replaced by a
+    # laterally-white realisation riding the same smooth brightness envelope, which leaves
+    # the imaged resolution of deterministic structure untouched.
+    f = float(np.clip(speckle_decorrelation, 0.0, 1.0))
+    if f > 0:
+        env = _lateral_beam_filter(np.abs(r).astype(np.complex128),
+                                   beam_waist_um / dx_um).real
+        g2 = (rng.standard_normal((n_depth, n_x))
+              + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+        out = np.sqrt(1.0 - f) * out + np.sqrt(f) * env * g2
+    return out
 
 
 class CoherentField:

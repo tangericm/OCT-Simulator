@@ -63,7 +63,13 @@ def test_averaging_reduces_speckle_contrast():
         return band.std() / (band.mean() + 1e-12)
     raw = contrast(1)
     avg = contrast(16)
-    assert avg < 0.6 * raw, (raw, avg)             # averaging suppresses speckle
+    # Averaging suppresses the speckle but NOT the deterministic intra-layer structure
+    # (mottling gain field, attenuation gradient, boundary softening), so the ratio floors
+    # out well above 1/sqrt(N). The bound is 0.75 rather than 0.6 because the noise
+    # coefficients are now calibrated to the measured device SNR: a single raw frame is
+    # itself much less noisy than it used to be, which narrows the raw-to-averaged gap.
+    assert avg < 0.75 * raw, (raw, avg)
+    assert avg < 0.45, avg                          # and lands in the speckle-reduced regime
 
 
 def test_averages_default_is_raw():
@@ -75,9 +81,12 @@ def test_directional_reflectance_fades_photoreceptors_but_not_rpe():
     the layer tilts (periphery); the melanin-rich RPE stays angle-stable."""
     from octsim.anatomy.retina import RetinaModel, RETINA_LAYERS
 
-    # steep curvature so the photoreceptor band is clearly tilted at the scan edge
+    # Steep curvature so the photoreceptor band is clearly tilted at the scan edge. The sag
+    # limit is kept well clear of the actual sag (~790 µm here, anatomic + fan-beam): it is a
+    # depth-window overflow guard, not a shape knob, and letting it engage would compress the
+    # peripheral slope that this test is about.
     m = RetinaModel(location="macula", center_x_um=3000.0, directional_strength=0.7,
-                    curvature_radius_um=8000.0, curvature_sag_um=600.0, vessels=[])
+                    curvature_radius_um=8000.0, curvature_sag_um=1500.0, vessels=[])
     x = np.linspace(0.0, 6000.0, 400)
     cross = m.cross_section(0.0, x, 1050.0)
     gain = cross.layer_directional

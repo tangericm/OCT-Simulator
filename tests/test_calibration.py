@@ -15,7 +15,7 @@ from octsim.anatomy.retina import RetinaModel  # noqa: E402
 
 def test_literature_profile_is_well_formed():
     p = cal.literature_profile()
-    assert len(p.layers) == 11
+    assert len(p.layers) == 13          # NFL..choroid, incl. the dark OS band and BM+CC
     assert p.curvature_concave is True
     assert p.boundary_sharpness_um > 0
     names = [ly.name for ly in p.layers]

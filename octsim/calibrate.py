@@ -42,15 +42,18 @@ from .data import unlabeled
 BACKSCATTER_BANDS = [
     ("NFL", ["NFL"]),
     ("inner", ["GCL", "IPL", "INL", "OPL"]),
-    ("ONL", ["ONL"]),
-    ("outer", ["ELM", "EZ", "IZ", "RPE"]),
+    # OS is the dark outer-segment band; it belongs with the nuclear/low-scatter group, not
+    # with the bright outer complex, or a single multiplier would raise the trough with the
+    # peaks and the EZ/RPE bimodality could never be fitted.
+    ("ONL", ["ONL", "OS"]),
+    ("outer", ["ELM", "EZ", "IZ", "RPE", "BMCC"]),
     ("choroid", ["choroid"]),
 ]
 # Attenuation multiplier bands (4): coarser depth zones.
 ATTENUATION_BANDS = [
     ("inner", ["NFL", "GCL", "IPL", "INL", "OPL"]),
-    ("nuclear", ["ONL", "ELM"]),
-    ("outer", ["EZ", "IZ", "RPE"]),
+    ("nuclear", ["ONL", "ELM", "OS"]),
+    ("outer", ["EZ", "IZ", "RPE", "BMCC"]),
     ("choroid", ["choroid"]),
 ]
 
