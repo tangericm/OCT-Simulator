@@ -55,6 +55,7 @@ class ResolvedConfig:
     geometry: ScanGeometry
     timing: Timing
     beam_waist_um: float
+    speckle_corr_lateral_um: float
     pivot_distance_um: float
     scan_distortion_correction: float
     reference_amp: float
@@ -108,8 +109,21 @@ class SimConfig:
     #: Devices differ by more than 2x, so this cannot be a universal constant; it is the
     #: single knob that made every held-out corpus over-curve when it was baked in at the
     #: Maestro3 value. Calibrate it per corpus, do not fit it globally.
-    scan_distortion_correction: float = 0.86
+    #:
+    #: ``None`` (the default) means "take it from ``instrument``, or 0.86 if that device
+    #: does not carry one". An explicit float always wins. It cannot use the codebase's
+    #: usual ``0`` sentinel because 0.0 already means something here — fully flattened.
+    scan_distortion_correction: float | None = None
     beam_waist_um: float = 15.0
+    #: Lateral correlation length of the sub-resolution speckle decorrelation, µm
+    #: (Gaussian σ of the field). An INSTRUMENT property, and a **physical length**: one
+    #: value reproduces the measured lateral speckle grain of all seven Maestro corpora,
+    #: which span 2.93–23.44 µm of A-line pitch. Fitting the metric directly against those
+    #: corpora gives σ ≈ 5 µm; the shipped 4 µm is the value that lands the *rendered*
+    #: grain on target, because the beam-filtered component contributes as well. See the
+    #: note in :func:`~octsim.sample.build_reflectivity_from_boundaries`. 0 = laterally
+    #: white, which makes the grain scale with the A-line pitch (the pre-2026-07 behaviour).
+    speckle_corr_lateral_um: float = 4.0
     slow_fov_um: float = 500.0              # slow (y) axis FOV for a volume
     n_frames: int = 32                      # frames in a volume (forced to 1 for bscan)
 
@@ -324,8 +338,9 @@ class SimConfig:
 
         return ResolvedConfig(
             source=source, geometry=geometry, timing=timing, beam_waist_um=beam_waist,
+            speckle_corr_lateral_um=self.speckle_corr_lateral_um,
             pivot_distance_um=self.pivot_distance_um,
-            scan_distortion_correction=self.scan_distortion_correction,
+            scan_distortion_correction=self.effective_scan_distortion(),
             reference_amp=self.reference_amp, dispersion_coeffs=disp_coeffs,
             falloff_6db_um=self.falloff_6db_um, axial_wrap=bool(self.axial_wrap),
             noise=noise, averages=self.averages,
@@ -334,6 +349,30 @@ class SimConfig:
             microsaccade=self.microsaccade, anatomy=self.anatomy,
             scan_pattern=self.scan_pattern, sample_depth_um=self.sample_depth_um,
             sample_lateral_offset_um=self.sample_lateral_offset_um, derived=derived)
+
+    #: Applied when neither the config nor the instrument names a value. It is the Maestro3
+    #: number, kept only so a config with no instrument renders as it always has.
+    DEFAULT_SCAN_DISTORTION = 0.86
+
+    def effective_scan_distortion(self) -> float:
+        """Vendor scan-distortion correction actually in force: config > instrument > default.
+
+        Lives here rather than in :meth:`resolve` because ``generate.build_scene`` stamps
+        this onto the retina from the *config*, not from the ``ResolvedConfig`` — overlaying
+        it only into the latter would leave the rendered image unchanged while making
+        ``resolved.scan_distortion_correction`` report the device value.
+        """
+        if self.scan_distortion_correction is not None:
+            return float(self.scan_distortion_correction)
+        if self.instrument:
+            try:
+                from .instrument import load_instrument
+                v = load_instrument(self.instrument).scan_distortion_correction
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return float(self.DEFAULT_SCAN_DISTORTION)
 
     def _resolve_noise(self, source=None, instrument=None) -> NoiseModel:
         """Build the noise model. ``NoiseModel.read`` is an ABSOLUTE per-pixel std.
@@ -349,10 +388,20 @@ class SimConfig:
         not commensurate with the reference-DC units used above. Adopting it directly
         raises the floor ~11x and drives the whole retina into the noise. Grounding the
         floor in it needs that measurement re-expressed in spectrum units first.
+
+        ``Instrument.snr_db`` IS adopted, as a multiplier on all three coefficients. SNR is
+        an acquisition property, not a tissue one, and supplying each device's own is what
+        took held-out Maestro2 from 4/7 to 9/9 with no tissue refitting. It scales the whole
+        model rather than the read term because the floor is shot-dominated — see the note
+        on the coefficients above. ``target_snr_db`` is NOT the channel for this: measured
+        on a Maestro2 render it moves the deep floor +3.0 dB where the device gap is 6.7 dB,
+        because it back-solves ``read`` alone.
         """
         if self.noise_free or self.noise_level <= 0:
             return NoiseModel.none()
         lvl = self.noise_level
+        if instrument is not None:
+            lvl *= float(getattr(instrument, "noise_scale", 1.0))
 
         ref_dc = float(self.reference_amp) ** 2
         if source is not None:

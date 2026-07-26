@@ -33,6 +33,14 @@ from .source import LightSource
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
+#: Measured image SNR (dB) of the corpus the noise coefficients in :class:`SimConfig` were
+#: calibrated against — Maestro3 6 mm/1024, from
+#: ``octsim/data/texture_maestro3_macula_meta.json``. A device with its own measured
+#: ``snr_db`` is scaled relative to this; see :attr:`Instrument.noise_scale`.
+#: Full precision on purpose: it makes ``noise_scale`` exactly 1.0 for the calibration
+#: device, so overlaying an instrument cannot nudge the corpus it was calibrated on.
+REFERENCE_SNR_DB = 52.04221179196247
+
 #: bundled instrument keywords → JSON filename (raw calibration files are never committed).
 _BUNDLED_INSTRUMENT = {
     "maestro3": "instrument_maestro3.json",
@@ -56,6 +64,16 @@ class Instrument:
     floor_db: float = -60.0                # display/noise floor seed
     falloff_6db_um: float = 0.0            # sensitivity roll-off (0 = none measured)
     axial_fwhm_um: float = 0.0            # measured axial PSF FWHM (diagnostic)
+    #: Fraction of the geometric sag surviving the vendor's scan-distortion correction.
+    #: A DEVICE property: measured against a nominal 6 mm B-scan (raw geometric sag
+    #: ~585 µm), Maestro3 flattens to 504 µm -> 0.86 and Maestro2 to 249 µm -> 0.43. Two
+    #: units of the same product line differ by more than 2x, so it cannot be a constant.
+    #: ``None`` = not measured for this device; the SimConfig default applies.
+    scan_distortion_correction: float | None = None
+    #: Measured image SNR of this device's corpus, dB. Scales the noise coefficients
+    #: relative to :data:`REFERENCE_SNR_DB`, the corpus they were calibrated against.
+    #: 0 = not measured, noise left at the calibration level.
+    snr_db: float = 0.0
     source: str = "measured"             # provenance string
 
     # ------------------------------------------------------------------ (de)serialize
@@ -75,9 +93,25 @@ class Instrument:
             "floor_db": float(self.floor_db),
             "falloff_6db_um": float(self.falloff_6db_um),
             "axial_fwhm_um": float(self.axial_fwhm_um),
+            "scan_distortion_correction": (None if self.scan_distortion_correction is None
+                                           else float(self.scan_distortion_correction)),
+            "snr_db": float(self.snr_db),
             "source": self.source,
         }
         return d
+
+    @property
+    def noise_scale(self) -> float:
+        """Multiplier taking the calibration corpus's noise to this device's own.
+
+        SNR is an acquisition property — gain, reference power, integration time — not a
+        tissue one, so a quieter or noisier unit must not be absorbed into the layer table.
+        Supplying each device's own measured SNR is what took held-out Maestro2 from 4/7 to
+        9/9 in round 2 with zero tissue refitting.
+        """
+        if not self.snr_db:
+            return 1.0
+        return float(10.0 ** ((REFERENCE_SNR_DB - float(self.snr_db)) / 20.0))
 
     @classmethod
     def from_dict(cls, d: dict) -> "Instrument":

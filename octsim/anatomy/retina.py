@@ -348,9 +348,19 @@ class RetinaModel:
     # non-Rayleigh volume speckle: effective #scatterers per resolution cell (K-distribution
     # shape M). None = fully-developed Rayleigh (legacy). Small M => super-Rayleigh heavy tail.
     speckle_shape: float | None = None
-    #: Fraction of speckle power decorrelated per A-line (see the note in
-    #: build_reflectivity_from_boundaries). Fitted to the 2048-A-line lateral grain.
-    speckle_decorrelation: float = 0.12
+    #: Fraction of speckle power carrying the instrument's own lateral decorrelation
+    #: length rather than the beam's (see the note in build_reflectivity_from_boundaries).
+    #: Was 0.12 when the mixture was not variance-matched and the decorrelated component
+    #: was white per A-line; both of those made the *effective* fraction move with the
+    #: sampling pitch, so 0.12 was never the number it appeared to be. Re-fitted against
+    #: the lateral grain of the Maestro3 1024- and Maestro2 2048-A-line corpora together.
+    #: It trades against inner-retina lamination monotonically: at f=0 ``inner_swing_db``
+    #: matches real to +0.09 dB while the grain is 13.6 um too coarse, and at f=1 the grain
+    #: is right to 0.4 um while the swing is 2.7 dB low. 0.75-0.85 is the window where both
+    #: gates hold; 0.75 is the end of it that keeps the best WORST-case margin (grain 1.7
+    #: sigma / swing 1.2 sigma of the seed spread, against 3.2 / 0.7 at 0.85). That the
+    #: window is only 0.1 wide is a real finding, not a tuning detail — see R1.
+    speckle_decorrelation: float = 0.75
     #: Multiple-scattering diffuse pedestal (see build_reflectivity_from_boundaries).
     #: Fitted against the real mean A-line tail below the RPE: without it the simulated
     #: choroid falls ~6 dB too fast over the first 400 um. Part of the choroidal signal is

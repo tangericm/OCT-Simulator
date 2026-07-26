@@ -83,9 +83,10 @@ def load_flat_corpus(folder: str, *, pattern: str = "*.jpeg", limit: int | None 
 #: pitch of corpora that ship no metadata (see :func:`calibrate_axial_pitch`).
 NORMATIVE_RETINA_UM = 300.0
 
-#: SNR (dB) of the corpus the noise coefficients in SimConfig were calibrated against
-#: (Maestro3, octsim/data/texture_maestro3_macula_meta.json).
-REFERENCE_SNR_DB = 52.04
+#: Re-exported so this module keeps one name for it, but the value lives on the instrument
+#: side — a corpus's SNR belongs to the device that acquired it, not to the harness that
+#: scores it. See :data:`octsim.instrument.REFERENCE_SNR_DB`.
+from ..instrument import REFERENCE_SNR_DB  # noqa: E402,F401
 
 
 def noise_level_for_snr(snr_db: float, ref_db: float = REFERENCE_SNR_DB) -> float:
@@ -97,6 +98,9 @@ def noise_level_for_snr(snr_db: float, ref_db: float = REFERENCE_SNR_DB) -> floa
     Maestro3-tuned simulator against Maestro2. Supplying each corpus's own SNR is therefore
     a device calibration, not a fudge: without it the harness reports a tissue-model failure
     for what is purely an exposure difference.
+
+    Prefer ``SimConfig(instrument=...)``, which applies :attr:`Instrument.noise_scale`
+    automatically. This stays for corpora that have a measured SNR but no instrument model.
     """
     return float(10.0 ** ((ref_db - float(snr_db)) / 20.0))
 
@@ -133,8 +137,13 @@ def calibrate_axial_pitch(images, dz_guess: float, dx: float,
 HOLDOUT_CORPORA = {
     # Same vendor, different unit / gain / operator, and crucially still LINEAR domain:
     # the strongest generalisation test available.
+    # ``instrument`` is the single source for this corpus's device numbers: its
+    # scan-distortion correction (0.43) and measured SNR (45.33 dB) live in
+    # octsim/data/instrument_maestro2.json and reach the renderer through
+    # SimConfig(instrument="maestro2"). The corpora below have no instrument model, so they
+    # still carry a ``distortion`` here as a fallback.
     "maestro2": dict(kind="raw", tier="full", dz=3.87, dz_known=True, fov_um=6000.0,
-                     fov_known=True, distortion=0.43, snr_db=45.33,
+                     fov_known=True, instrument="maestro2",
                      path=os.path.join("Maestro2",
                                        "Line_6mm_2048Aline_135degCW_50frame_gain165")),
     # Cross-vendor (Optovue), display domain: geometry and spatial statistics only.
