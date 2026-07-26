@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # The suite is deliberately data-free: every test either renders its own scene or
+      # skips cleanly when real OCT data / PySide6 are absent. Raw scans are never
+      # committed, so CI exercises the forward model and the physics assertions only.
+      - name: Test
+        run: pytest -q --durations=15
+
+  physics:
+    name: wavelength physics
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      # Called out as its own job because it is the only check that cannot be passed by
+      # fitting the 840 nm Maestro corpus: it asserts the known wavelength behaviour of
+      # the tissue model (choroidal penetration and deep-tail decay vs lambda).
+      - name: Multi-wavelength assertions
+        run: python tests/test_wavelength.py

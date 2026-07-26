@@ -365,7 +365,16 @@ def average_profiles(profiles: list) -> CalibrationProfile:
 
 # --------------------------------------------------------------------------- apply
 def _layer_split_map(source_names):
-    """Map the sim's 11 layers onto a segmentation scheme's layers ``(my, source, frac)``.
+    """Map the sim's layers onto a segmentation scheme's layers.
+
+    Returns ``(my_name, sources)`` where ``sources`` is a list of ``(source_name, frac)``
+    contributions summed to give that layer's thickness, or ``None`` for the parametric
+    choroid. A layer may draw from more than one source band, which is needed because the
+    schemes do not partition the photoreceptor complex the way the sim does: OCTA-500's
+    "RPE" band is 22-30 µm, far thicker than a bare RPE, because it also contains the
+    interdigitation zone and part of the outer segments. Mapping it 1:1 compressed the
+    ELM->RPE stack to ~60 % of its real thickness, which is why the ELM never separated
+    from the EZ and the EZ/RPE peak spacing came out ~9 µm short.
 
     Handles both the Duke DME 7-layer scheme (``GCLIPL``, merged ``OSRPE``) and the JHU
     8-layer scheme (``GCIP``, separate ``OS``/``RPE``). Combined source layers are split by
@@ -378,14 +387,26 @@ def _layer_split_map(source_names):
     iz = t["IZ"] / (t["IZ"] + t["RPE"])
     s = set(source_names)
     gcip = "GCIP" if "GCIP" in s else "GCLIPL"
-    m = [("NFL", "RNFL", 1.0), ("GCL", gcip, gcl), ("IPL", gcip, 1 - gcl),
-         ("INL", "INL", 1.0), ("OPL", "OPL", 1.0), ("ONL", "ONL", 1.0),
-         ("ELM", "IS", elm), ("EZ", "IS", 1 - elm)]
-    if "OS" in s:                          # JHU: OS and RPE segmented separately
-        m += [("IZ", "OS", 1.0), ("RPE", "RPE", 1.0)]
-    else:                                  # Duke: OS+RPE merged
-        m += [("IZ", "OSRPE", iz), ("RPE", "OSRPE", 1 - iz)]
-    m += [("choroid", None, None)]
+    m = [("NFL", [("RNFL", 1.0)]), ("GCL", [(gcip, gcl)]), ("IPL", [(gcip, 1 - gcl)]),
+         ("INL", [("INL", 1.0)]), ("OPL", [("OPL", 1.0)]), ("ONL", [("ONL", 0.95)]),
+         ("ELM", [("IS", elm)]), ("EZ", [("IS", 1 - elm)])]
+    if "OS" in s:
+        # The scheme's "OS" band is the dark outer-segment zone but is segmented thin; its
+        # "RPE" band carries the rest of the outer segments plus the IZ plus the RPE. Split
+        # that band so the outer segments get their true extent and the IZ stays a thin line.
+        # The scheme's RPE band has to cover IZ + RPE + Bruch's + choriocapillaris, so it
+        # is split four ways. The outer segments are thicker than the scheme's thin "OS"
+        # band allows, and the ONL/photoreceptor boundary is the least certain one in any
+        # segmentation, so OS also takes a slice of ONL rather than of RPE.
+        m += [("OS", [("OS", 1.0), ("ONL", 0.05)]),
+              ("IZ", [("RPE", 0.13)]),
+              ("RPE", [("RPE", 0.60)]),
+              ("BMCC", [("RPE", 0.27)])]
+    else:                                  # Duke: OS+IZ+RPE merged into one band
+        tot = t["OS"] + t["IZ"] + t["RPE"] + t["BMCC"]
+        m += [("OS", [("OSRPE", t["OS"] / tot)]), ("IZ", [("OSRPE", t["IZ"] / tot)]),
+              ("RPE", [("OSRPE", t["RPE"] / tot)]), ("BMCC", [("OSRPE", t["BMCC"] / tot)])]
+    m += [("choroid", None)]
     return m
 
 
@@ -398,7 +419,8 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     whose OPTICS come from ``optics`` (a measured/literature profile). The exact labels are
     unaffected — the sampled thickness field just drives the physics forward model.
     """
-    from .anatomy.retina import RETINA_LAYERS, RetinaModel, BoundaryUndulation
+    from .anatomy.retina import (RETINA_LAYERS, RetinaModel, BoundaryUndulation,
+                                 ONH_CUP_DEPTH_RANGE)
 
     optics = optics or literature_profile()
     opt_by_name = {ly.name: ly for ly in optics.layers}
@@ -409,14 +431,17 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     n_ecc = shape.ecc_grid_um.size
     data_thick = np.zeros((len(RETINA_LAYERS), n_ecc))
     layers = []
-    for i, (my_name, duke_name, frac) in enumerate(smap):
+    for i, (my_name, sources) in enumerate(smap):
         canon = next(ly for ly in RETINA_LAYERS if ly.name == my_name)
         oc = opt_by_name.get(my_name)
-        if duke_name is None:                                # choroid: parametric, constant
+        if sources is None:                                  # choroid: parametric, constant
             thick_um = (oc.thickness_um if oc else canon.thickness_um) * float(rng.uniform(0.9, 1.1))
             data_thick[i] = thick_um
         else:
-            data_thick[i] = np.clip(sampled[duke_idx[duke_name]] * frac, 0.1, None)
+            acc = np.zeros(n_ecc)
+            for src_name, frac in sources:
+                acc = acc + sampled[duke_idx[src_name]] * frac
+            data_thick[i] = np.clip(acc, 0.1, None)
             thick_um = float(np.mean(data_thick[i]))         # scalar reference for the anchor
         layers.append(replace(
             canon, thickness_um=thick_um,
@@ -435,9 +460,10 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     undU = BoundaryUndulation.make(len(RETINA_LAYERS) + 2, rng,
                                    amp_um=float(np.clip(shape.undulation_rms_um * 1.1, 2.0, 9.0)),
                                    corr_um=float(rng.uniform(350.0, 600.0)))
-    from .anatomy.retina import _texture_fields
+    from .anatomy.retina import _texture_fields, random_choroid_lumens
     texture_contrast = _eye_jitter(rng, optics.texture_contrast)
-    mottle_field, choroid_field = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
+    mottle_field, _ = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
+    choroid_lumens = random_choroid_lumens(rng, lateral_fov_um=lateral_fov_um)
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
         center_y_um=float(rng.uniform(-100, 100)), undulation=undU,
@@ -445,15 +471,15 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
         curvature_concave=optics.curvature_concave, boundary_sharpness_um=optics.boundary_sharpness_um,
         choroid_contrast=optics.choroid_contrast, tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
         disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
-        onh_cup_depth_um=float(rng.uniform(250.0, 400.0)),
-        onh_radius_um=float(rng.uniform(700.0, 1000.0)),
+        onh_cup_depth_um=float(rng.uniform(*ONH_CUP_DEPTH_RANGE)),
+        onh_radius_um=float(rng.uniform(620.0, 820.0)),
         texture_contrast=texture_contrast, interface_jitter=_eye_jitter(rng, optics.interface_jitter),
         vitreous_backscatter=_eye_jitter(rng, optics.vitreous_backscatter),
         directional_strength=float(np.clip(_eye_jitter(rng, optics.directional_strength), 0.0, 1.0)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
         speckle_shape=optics.speckle_shape,   # pass the mean directly: no rng draw => label map invariant
         curvature_conic=float(getattr(optics, "curvature_conic", 0.0)),
-        mottle_field=mottle_field, choroid_field=choroid_field,
+        mottle_field=mottle_field, choroid_lumens=choroid_lumens,
         data_thickness=data_thick, data_ecc_um=shape.ecc_grid_um, vessels=vessels)
 
 
@@ -464,7 +490,8 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
     ``profile``. Thicknesses/pit are drawn around the profile's means (per-eye variation);
     reflectivity/attenuation/curvature/boundary-sharpness come straight from the data.
     """
-    from .anatomy.retina import RETINA_LAYERS, RetinaModel, BoundaryUndulation
+    from .anatomy.retina import (RETINA_LAYERS, RetinaModel, BoundaryUndulation,
+                                 ONH_CUP_DEPTH_RANGE)
     from .features import BloodVessel
 
     cal_by_name = {ly.name: ly for ly in profile.layers}
@@ -493,7 +520,7 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
         vessels.append(BloodVessel(
             x0_um=vx, y0_um=float(rng.uniform(-200, 200)), caliber_um=cal,
             plexus_offset_um=plexus, slope=float(rng.uniform(-0.4, 0.4)),
-            shadow_od=float(rng.uniform(0.7, 1.5))))
+            shadow_scale=float(rng.uniform(0.8, 1.2))))
 
     undU = BoundaryUndulation.make(len(RETINA_LAYERS) + 2, rng,
                                    amp_um=float(rng.uniform(2.0, 6.0)),
