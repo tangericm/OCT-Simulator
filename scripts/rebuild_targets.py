@@ -6,7 +6,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from octsim.data import real_maestro, unlabeled
 
-DR = "C:/Users/erict/OneDrive/Desktop/Projects/OCT Data"
+# Root of the raw device captures. These are clinical acquisitions and are not
+# redistributed with this repo, so the path is an environment variable rather
+# than a constant: OCTSIM_DATA_ROOT=/path/to/OCT\ Data python scripts/rebuild_targets.py
+DR = os.environ.get("OCTSIM_DATA_ROOT", "")
+if not DR:
+    raise SystemExit(
+        "Set OCTSIM_DATA_ROOT to the directory holding the raw device folders "
+        "listed in CORPORA below. The captures are not part of this repository."
+    )
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "octsim", "data")
 
 # name, folder(rel to DR), fov_um, stride, limit
