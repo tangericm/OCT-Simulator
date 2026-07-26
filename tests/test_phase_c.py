@@ -49,10 +49,11 @@ def test_foveal_pit_thins_inner_layers_at_centre():
 
 
 def test_photoreceptor_rpe_complex_stays_flat_under_the_pit():
-    # the RPE/choroid boundary (posterior anchor) must not move across the pit
-    # (flatten the global contour to isolate the foveal-thinning effect)
+    # the RPE/choroid boundary (posterior anchor) must not move across the pit.
+    # Flatten the global contour to isolate the foveal-thinning effect: that now means
+    # zeroing BOTH sag terms — the anatomic radius and the fan-beam scan pivot.
     m = RetinaModel(location="macula", center_x_um=FOV / 2, vessels=[],
-                    curvature_radius_um=1e12)
+                    curvature_radius_um=1e12, pivot_distance_um=0.0)
     x = np.linspace(0.0, FOV, 256)
     cross = m.cross_section(0.0, x)
     rpe_choroid = cross.opt_b[10]      # boundary below RPE
@@ -72,7 +73,7 @@ def test_macula_reconstructs_layered_structure():
 def test_blood_vessel_casts_a_shadow():
     from octsim.features import BloodVessel
     src_depth = 200.0
-    vessel = BloodVessel(x0_um=FOV / 2, y0_um=0.0, caliber_um=90.0, shadow_od=1.4)
+    vessel = BloodVessel(x0_um=FOV / 2, y0_um=0.0, caliber_um=90.0)
     m = RetinaModel(location="macula", center_x_um=FOV * 0.15,  # fovea off to the side
                     surface_opt_um=src_depth, vessels=[vessel])
     img, depth, x, cross = _render(m, seed=1)
@@ -130,11 +131,11 @@ def test_wide_scan_shows_both_fovea_and_disc():
 
 
 def test_narrow_macula_has_no_disc():
-    # a 6 mm macula scan does not reach the disc -> fast 11-layer path, no canal label
+    # a 6 mm macula scan does not reach the disc -> fast macular path, no canal label
     m = RetinaModel(location="macula", center_x_um=3000.0, disc_dx_um=4760.0, vessels=[])
     cross = m.cross_section(0.0, np.linspace(0.0, 6000.0, 300))
     assert "canal" not in cross.label_names
-    assert len(cross.label_names) == 11
+    assert len(cross.label_names) == 13
 
 
 def test_onh_shows_central_excavation():

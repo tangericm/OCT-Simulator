@@ -51,6 +51,10 @@ class SampleResult:
     #: the actual detector interferogram I(k, x) of frame 0 — the raw spectra the
     #: displayed B-scan is the FFT reconstruction of (incl. noise). [n_k, n_x] float32.
     spectra: np.ndarray | None = None
+    #: the reference spectrum P(k)·a_ref² subtracted before the IFFT. Pass this as
+    #: ``reconstruct_bscan(spectra, background=dc_background)`` to reproduce the
+    #: displayed B-scan exactly from :attr:`spectra`. [n_k] float64.
+    dc_background: np.ndarray | None = None
 
     @property
     def k_axis_rad_per_um(self) -> np.ndarray:
@@ -81,6 +85,16 @@ class SampleResult:
 # --------------------------------------------------------------------------- scenes
 def build_scene(config: SimConfig, rng: np.random.Generator):
     """Pick/sample the scene for ``config.anatomy`` (RetinaModel or preset Sample)."""
+    scene = _build_scene_inner(config, rng)
+    # The fan-beam pivot is scan geometry, not anatomy, so it is owned by the config and
+    # stamped onto whichever retina builder ran (each has its own constructor).
+    if isinstance(scene, RetinaModel):
+        scene.pivot_distance_um = float(config.pivot_distance_um)
+        scene.scan_distortion_correction = float(config.scan_distortion_correction)
+    return scene
+
+
+def _build_scene_inner(config: SimConfig, rng: np.random.Generator):
     a = config.anatomy
     fov = config.lateral_fov_um
     if a in RETINAL:
@@ -191,26 +205,66 @@ def _scene_params(scene) -> dict:
     return {"anatomy": getattr(scene, "name", "sample")}
 
 
+def _label_names(scene, resolved, x_axis, y_um) -> list:
+    """Ordered layer names for ``label_map`` (index i+1 -> names[i]).
+
+    Exported because the mapping is NOT fixed: when the optic disc is in view the field
+    model inserts a "canal" layer at index 1, so GCL is label 3 on a wide scan and label 2
+    on a 6 mm macular scan. A consumer that assumes a constant vocabulary silently mislabels
+    every layer below the insertion point.
+    """
+    if isinstance(scene, RetinaModel):
+        return list(scene.cross_section(
+            y_um, x_axis, resolved.source.center_wavelength_nm).label_names)
+    return [ly.name for ly in getattr(scene, "layers", [])]
+
+
+#: a layer thinner than this (optical µm) is treated as anatomically absent rather than
+#: rounded up to one label row
+_MIN_LAYER_UM = 0.05
+
+
 def _rasterize_labels(opt_b: np.ndarray, depth_axis_um: np.ndarray) -> np.ndarray:
-    """Per-pixel layer index (0 = above/below tissue) from optical boundaries."""
+    """Per-pixel layer index (0 = above/below tissue) from optical boundaries.
+
+    Guarantees that every layer with non-zero thickness occupies **at least one row** in
+    every column. A plain half-open depth comparison silently drops any layer thinner than
+    the depth pixel — at 3.87 µm/px that deleted the IZ from most columns and the RPE from
+    hundreds of them, so the exported ground truth showed anatomically continuous layers as
+    intermittently missing. The retina is continuous even where the *image* renders a band
+    weakly, and the labels have to say so or they are unusable as segmentation targets.
+    """
     n_depth = depth_axis_um.size
     n_x = opt_b.shape[1]
+    dz = float(depth_axis_um[1] - depth_axis_um[0]) if n_depth > 1 else 1.0
+    z0 = float(depth_axis_um[0])
+
+    rows = np.round((opt_b - z0) / dz).astype(np.intp)
+    thick = np.diff(opt_b, axis=0)
+    # walk down, forcing each present layer to claim a row without reordering boundaries
+    for i in range(1, rows.shape[0]):
+        rows[i] = np.maximum(rows[i], rows[i - 1] + (thick[i - 1] > _MIN_LAYER_UM))
+    np.clip(rows, 0, n_depth, out=rows)
+
     labels = np.zeros((n_depth, n_x), dtype=np.uint8)
-    d = depth_axis_um[:, None]
-    for i in range(opt_b.shape[0] - 1):
-        mask = (d >= opt_b[i][None, :]) & (d < opt_b[i + 1][None, :])
-        labels[mask] = i + 1
+    idx = np.arange(n_depth)[:, None]
+    for i in range(rows.shape[0] - 1):
+        labels[(idx >= rows[i][None, :]) & (idx < rows[i + 1][None, :])] = i + 1
     return labels
 
 
-def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
+def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um,
+                                render_depth=None):
     """Return ``(build(rng)->reflectivity, labels)`` — geometry computed once so
     incoherent averages redraw only the speckle."""
     depth = resolved.source.depth_axis_um()
+    label_depth = depth
+    if render_depth is not None:
+        depth = np.asarray(render_depth, float)
     fov = resolved.geometry.lateral_fov_um
     if isinstance(scene, RetinaModel):
         cross = scene.cross_section(y_um, x_axis, resolved.source.center_wavelength_nm)
-        labels = _rasterize_labels(cross.opt_b, depth)
+        labels = _rasterize_labels(cross.opt_b, label_depth)   # visible half only
 
         def build(rng, speckle=None):
             return build_reflectivity_from_boundaries(
@@ -224,10 +278,14 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um):
                 vitreous_backscatter=cross.vitreous_backscatter,
                 layer_directional=cross.layer_directional,
                 boundary_sharpness_um=cross.boundary_sharpness_um,
+                layer_sharpness_um=getattr(cross, "layer_sharpness_um", None),
+                speckle_decorrelation=getattr(cross, "speckle_decorrelation", 0.0),
+                ms_fraction=getattr(cross, "ms_fraction", 0.0),
+                ms_length_um=getattr(cross, "ms_length_um", 120.0),
                 texture_field=cross.texture_field, speckle=speckle,
                 k_shape=getattr(cross, "speckle_shape", None))
     else:
-        labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), depth)
+        labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), label_depth)
 
         def build(rng, speckle=None):
             return build_reflectivity(scene, depth, x_axis, beam_waist_um=resolved.beam_waist_um,
@@ -250,6 +308,23 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     y_axis = geom.y_axis()
     n_frames = geom.n_frames
     depth = src.depth_axis_um()
+
+    # OUT-OF-RANGE WRAP.
+    #
+    # The scene is normally rasterised onto exactly the n_k//2 rows the reconstruction
+    # returns, so nothing can ever lie beyond z_max and the simulator structurally cannot
+    # produce the fold-over that appears in essentially every real disc B-scan (and in any
+    # scan where the operator mis-positions the retina).
+    #
+    # The physics is already there and only the grid was preventing it: the detector
+    # spectrum is REAL, so its transform is Hermitian, and a scatterer at depth index
+    # p > n_k/2 carries a fringe frequency past Nyquist that aliases to n_k - p. Rendering
+    # the scene onto the full n_k-row grid and handing all of it to the forward model
+    # therefore folds deep structure back exactly as the device does, with no special-case
+    # artifact code.
+    render_depth = depth
+    if resolved.axial_wrap:
+        render_depth = np.arange(src.n_k) * src.depth_pixel_um
 
     motion = build_motion(timing, motion_level=resolved.motion_level,
                           axial_motion_um=resolved.axial_motion_um,
@@ -276,14 +351,27 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     speckle_alpha = float(np.exp(-slow_pitch / waist)) if (n_frames > 1 and slow_pitch > 0) else 0.0
     prev_g = None
 
+    # drawn on the RENDER grid, which is deeper than the visible one when axial_wrap is on
+    n_render = int(render_depth.size)
+
     def _draw_speckle(rng_):
-        return (rng_.standard_normal((n_depth, n_x))
-                + 1j * rng_.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+        return (rng_.standard_normal((n_render, n_x))
+                + 1j * rng_.standard_normal((n_render, n_x))) / np.sqrt(2.0)
+
+    # Exact reference-spectrum subtraction. The detector sees P(k)·|a_ref + E_s|², whose pure
+    # DC part is P(k)·a_ref² — a quantity the forward model *knows*, so it can be removed
+    # analytically instead of estimated. The fallback in reconstruct_bscan is a 128-tap box
+    # high-pass, which leaves a large low-frequency residual that reconstructs as a bright band
+    # at the top of the frame; with a bright optics profile that band becomes the image maximum
+    # and, because volume_db is peak-normalised below, it drags the whole B-scan down ~13 dB
+    # relative to real data. Subtracting the known DC is what a real device does with a
+    # background frame, and it costs one array.
+    dc_background = src.power_spectrum(src.k_grid()) * float(resolved.reference_amp) ** 2
 
     first_spectra = None
     for f in range(n_frames):
         y = float(y_axis[f]) if f < y_axis.size else 0.0
-        build, lab = _frame_reflectivity_builder(scene, resolved, x_axis, y)
+        build, lab = _frame_reflectivity_builder(scene, resolved, x_axis, y, render_depth)
         labels[f] = lab
         if moving:
             dz, _v, phase = motion.frame(f)
@@ -307,7 +395,7 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
                 dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
                 motion_dz_um=dz, washout_gain=wg, column_phase=phase)
             noisy = resolved.noise.apply(spectra, rng_)   # the digitised detector spectra
-            return reconstruct_bscan(noisy), noisy
+            return reconstruct_bscan(noisy, background=dc_background), noisy
 
         if navg > 1:  # incoherent (magnitude) averaging — raw speckle reduced, ART-like
             acc = np.zeros((n_depth, n_x))
@@ -329,9 +417,11 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
 
     return SampleResult(
         volume=volume, volume_db=volume_db, label_map=labels, depth_axis_um=depth,
-        x_axis_um=x_axis, y_axis_um=y_axis, resolved=resolved, params=_scene_params(scene),
+        x_axis_um=x_axis, y_axis_um=y_axis, resolved=resolved, params={**_scene_params(scene),
+                "label_names": _label_names(scene, resolved, x_axis, float(y_axis[0]))},
         seed_key=_seed_key(rng), motion_dz_um=(motion.dz_um if moving else None),
-        spectra=(first_spectra.astype(np.float32) if first_spectra is not None else None))
+        spectra=(first_spectra.astype(np.float32) if first_spectra is not None else None),
+        dc_background=dc_background)
 
 
 def _seed_key(rng: np.random.Generator) -> int:

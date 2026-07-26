@@ -81,6 +81,35 @@ def recon_frame(path: str, alines: int, kop, *, crop=(1024, 2048), floor_db=-60.
     return orient_ilm_up(db) if orient else db
 
 
+def recon_frame_linear(path: str, alines: int, kop, *, crop=(1024, 2048),
+                       orient=True) -> np.ndarray:
+    """Raw spectrum file → **linear intensity** B-scan (no log, no peak normalisation).
+
+    :func:`recon_frame` returns the dB display image, which is the wrong domain for
+    anything quantitative about energy — notably the depth-resolved attenuation estimator
+    in :mod:`octsim.attenuation`, whose whole basis is the ratio of a pixel's signal to the
+    integrated signal beneath it. Taking that ratio in a log domain, or on a peak-normalised
+    image, does not give attenuation.
+    """
+    d = np.fromfile(path, dtype=np.uint16)
+    if d.size != PIX * alines:
+        raise ValueError(f"{os.path.basename(path)}: {d.size} != {PIX*alines}")
+    raw = d.reshape((PIX, alines), order="F").astype(np.float64)
+    raw[:3, :] = raw[3:4, :]
+    raw[:, 0] = raw[:, 1]
+    raw = raw - raw.mean(axis=1, keepdims=True)
+    resamp = kop(raw)
+    win = np.hanning(PIX)[:, None]
+    depth = np.fft.ifft(resamp * win, axis=0)
+    inten = (np.abs(depth) ** 2)[crop[0]:crop[1], :]
+    if not orient:
+        return inten
+    prof = inten.mean(axis=1)
+    z = np.arange(prof.size)
+    centroid = float((z * prof).sum() / (prof.sum() + 1e-30))
+    return inten[::-1, :] if centroid > prof.size / 2 else inten
+
+
 def orient_ilm_up(img: np.ndarray) -> np.ndarray:
     """Flip depth so the retina reads ILM-up (bright-band centroid in the top half)."""
     prof = img.mean(axis=1)

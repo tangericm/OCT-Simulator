@@ -105,6 +105,9 @@ octsim/
   reconstruct.py   IFFT reconstruction (+ optional dispersion compensation)
   noise.py         shot / RIN / read
   generate.py      simulate() (B-scan/volume) + generate_dataset() (N samples)
+  realism_metrics.py  landmark detection, RPE flattening, sim-vs-real metric vector + gates
+  attenuation.py   depth-resolved mu (Vermeer 2014) — read the module docstring first
+  data/display_domain.py  held-out 8-bit corpora (OCTA-500, OCTID) + axial-pitch calibration
   presets.py       mirror / paper / cornea / macula (Sample)
   gui/             PySide6 app (launcher, widgets) + CLI (app.py)
 ```
@@ -118,9 +121,27 @@ python tests/test_phase_a.py  # ... phase_b, phase_c, phase_d, test_octsim
 QT_QPA_PLATFORM=offscreen python tests/test_gui_smoke.py
 ```
 
-The physics/anatomy/generation suites (33 checks) run in a couple of seconds and pin the
-resolvable config, timing, fall-off, dispersion, speed↔SNR trade, motion correlation, foveal pit,
-vessel shadow, ONH termination, and dataset reproducibility.
+The physics/anatomy/generation suites pin the resolvable config, timing, fall-off, dispersion,
+speed↔SNR trade, motion correlation, foveal pit, vessel shadow, ONH termination, and dataset
+reproducibility. `tests/test_wavelength.py` is the one check that cannot be passed by fitting a
+single device: it asserts the *known* wavelength behaviour of the tissue model (choroidal
+penetration and deep-tail decay at 840 / 1050 / 1310 nm). Every test is data-free — those needing
+real scans or PySide6 skip cleanly — so the whole suite runs in CI.
+
+## Realism validation
+
+```bash
+# training score against a real Maestro corpus, plus held-out devices with NO refitting
+python scripts/validate_realism.py --folder ".../Maestro3/6mm_1024Aline" \
+    --holdout maestro2 --holdout octa500 --holdout octid
+```
+
+Real and simulated frames go through the *same* metric code. The Maestro3 numbers are the
+training score; the held-out corpora are the generalization score, so a change that improves the
+first while worsening the second is visible as overfitting. Held-out corpora are metric-*tiered*:
+8-bit display-domain data has passed through an unknown tone curve, so only the statistics that
+survive it (geometry, spatial correlations) are gated there. Point `$OCT_DATA_ROOT` at the local
+scan tree; raw data is never committed.
 
 ## Roadmap
 
