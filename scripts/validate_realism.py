@@ -20,6 +20,12 @@ Exit status (the held-out corpora count — a cross-device regression must not e
     1  a gate failed, training or held-out
     2  all evaluated gates passed but a requested --holdout could not be loaded, so the
        generalization claim went unchecked
+
+A gate listed in :data:`octsim.realism_metrics.EXPECTED_FAIL` is a KNOWN gap with its reason
+recorded in the source. It prints as ``XFAIL``, is excluded from the passing count, and does
+not set exit 1 — the alternative, widening its tolerance until it passes, would convert a
+documented gap into a silent one. A waived gate that starts passing prints as ``XPASS``:
+that is a prompt to delete the waiver, not a failure.
 """
 
 from __future__ import annotations
@@ -77,7 +83,7 @@ SAMPLE_DEPTH_UM = 430.0
 def measure_sim(*, n_seeds: int, alines: int, fov_um: float, anatomy: str,
                 optics: str, instrument: str, shape_model: str, seed0: int,
                 sample_depth_um: float = SAMPLE_DEPTH_UM,
-                distortion: float = 0.86, noise_level: float = 1.0):
+                distortion: float | None = None, noise_level: float = 1.0):
     out, dz, dx = [], None, fov_um / alines
     for i in range(n_seeds):
         cfg = SimConfig(
@@ -103,6 +109,37 @@ def measure_sim(*, n_seeds: int, alines: int, fov_um: float, anatomy: str,
                   f"(optics={optics}, instrument={instrument or 'gaussian'})")
         out.append(rmet.measure(db, dz, dx))
     return out
+
+
+def _tally(rows, corpus: str):
+    """``(n_pass, n_gated, hard_failures, xfails, xpasses)`` for one corpus's rows.
+
+    A gate listed in :data:`octsim.realism_metrics.EXPECTED_FAIL` is a recorded known gap,
+    not a regression: it is counted separately and does not fail the run. Widening its
+    tolerance instead would turn a documented gap back into a silent one, which is the
+    failure mode this whole command exists to remove.
+    """
+    gated = [r for r in rows if r[7] is not None]
+    n_pass = sum(1 for r in gated if r[7])
+    hard, xfail, xpass = [], [], []
+    for r in gated:
+        out = rmet.gate_outcome(r[7], corpus, r[0])
+        if out == "FAIL":
+            hard.append(r[0])
+        elif out == "XFAIL":
+            xfail.append(r[0])
+        elif out == "XPASS":
+            xpass.append(r[0])
+    return n_pass, len(gated), hard, xfail, xpass
+
+
+def _waiver_note(xfail, xpass) -> str:
+    bits = []
+    if xfail:
+        bits.append(f"{len(xfail)} expected-failing ({', '.join(xfail)})")
+    if xpass:
+        bits.append(f"{len(xpass)} XPASS - remove the waiver ({', '.join(xpass)})")
+    return ("   [" + "; ".join(bits) + "]") if bits else ""
 
 
 def main() -> int:
@@ -140,11 +177,11 @@ def main() -> int:
     sim_agg = rmet.aggregate(sim_runs)
     rows = rmet.compare(real_agg, sim_agg)
     print()
-    print(rmet.format_table(rows))
+    print(rmet.format_table(rows, "training"))
 
-    gated = [r for r in rows if r[7] is not None]
-    n_pass = sum(1 for r in gated if r[7])
-    print(f"\ngates: {n_pass}/{len(gated)} passing   [TRAINING corpus]")
+    n_pass, n_gated, tr_hard, tr_xfail, tr_xpass = _tally(rows, "training")
+    print(f"\ngates: {n_pass}/{n_gated} passing   [TRAINING corpus]"
+          + _waiver_note(tr_xfail, tr_xpass))
 
     # --- held-out corpora: same metric code, no refitting -----------------------------
     holdouts = {}
@@ -167,21 +204,32 @@ def main() -> int:
         alines_h = imgs[0].shape[1]
         if not spec.get("fov_known", True):
             drop.add("sag_optical_um")      # sag is meaningless without the true lateral FOV
+        # A corpus that has an instrument model supplies its own scan-distortion
+        # correction and SNR through it, so the harness must NOT also pass them here --
+        # that is the single-source rule R0b exists for. Corpora with no instrument model
+        # (the cross-vendor ones) still take a distortion from the table.
+        h_inst = spec.get("instrument", a.instrument)
         h_sim = measure_sim(n_seeds=a.seeds, alines=alines_h, fov_um=spec["fov_um"],
-                            anatomy=a.anatomy, optics=a.optics, instrument=a.instrument,
+                            anatomy=a.anatomy, optics=a.optics, instrument=h_inst,
                             shape_model=a.shape_model, seed0=a.seed0,
-                            distortion=spec.get("distortion", 0.86),
-                            noise_level=(display_domain.noise_level_for_snr(spec["snr_db"])
-                                         if "snr_db" in spec else 1.0))
+                            distortion=spec.get("distortion"))
         keep = lambda d: {k: v for k, v in rmet.restrict(d, tier).items()
                           if k.split(".")[0] not in drop}
         h_rows = rmet.compare(keep(rmet.aggregate(h_real)), keep(rmet.aggregate(h_sim)))
         print(f"\n===== HOLDOUT {name}  ({len(imgs)} frames, {alines_h} A-lines, "
               f"dz={dz} um, dx={dx:.2f} um, tier={tier}) =====")
-        if "snr_db" in spec:
-            print(f"  [device SNR {spec['snr_db']:.1f} dB vs the calibration corpus's "
-                  f"{display_domain.REFERENCE_SNR_DB:.1f} dB -> noise_level="
-                  f"{display_domain.noise_level_for_snr(spec['snr_db']):.2f}]")
+        if h_inst:
+            from octsim.instrument import load_instrument, REFERENCE_SNR_DB
+            _i = load_instrument(h_inst)
+            # report the distortion actually in force, not the instrument's: a corpus with
+            # no instrument model of its own overrides it from HOLDOUT_CORPORA.
+            _d = spec.get("distortion")
+            _src = "corpus table" if _d is not None else f"instrument {h_inst}"
+            if _d is None:
+                _d = _i.scan_distortion_correction
+            print(f"  [instrument={h_inst}: scan_distortion_correction={_d} ({_src}), "
+                  f"SNR {_i.snr_db:.1f} dB vs the calibration corpus's "
+                  f"{REFERENCE_SNR_DB:.1f} dB -> noise x{_i.noise_scale:.2f}]")
         if spec.get("dz_calibrated"):
             print(f"  [no axial metadata: pitch calibrated to dz={dz:.3f} um from a "
                   f"{display_domain.NORMATIVE_RETINA_UM:.0f} um normative retina;")
@@ -189,12 +237,13 @@ def main() -> int:
         if tier != "full":
             print(f"  [{tier}-domain source: dB-valued and floor-referenced metrics are")
             print( "   not recoverable through an unknown tone curve and are omitted]")
-        print(rmet.format_table(h_rows))
-        hg = [r for r in h_rows if r[7] is not None]
-        hp = sum(1 for r in hg if r[7])
-        print(f"  gates: {hp}/{len(hg)} passing   [GENERALIZATION]")
+        print(rmet.format_table(h_rows, name))
+        hp, hg_n, h_hard, h_xfail, h_xpass = _tally(h_rows, name)
+        print(f"  gates: {hp}/{hg_n} passing   [GENERALIZATION]"
+              + _waiver_note(h_xfail, h_xpass))
         holdouts[name] = {"tier": tier, "alines": alines_h,
-                          "n_pass": hp, "n_gated": len(hg),
+                          "n_pass": hp, "n_gated": hg_n,
+                          "n_hard_fail": len(h_hard), "xfail": h_xfail, "xpass": h_xpass,
                           "rows": [{"metric": r[0], "real": r[1], "sim": r[3],
                                     "delta": r[5], "tol": r[6], "pass": r[7]}
                                    for r in h_rows]}
@@ -221,11 +270,13 @@ def main() -> int:
     #   2  everything that ran passed, but a requested holdout could not be evaluated
     #      (missing/unhydrated data). Distinct from 1: nothing is known to be broken, but
     #      the generalization claim was NOT checked, so this must not read as success.
-    h_fail = {n: v for n, v in holdouts.items() if v["n_pass"] != v["n_gated"]}
-    print(f"\nSUMMARY  training {n_pass}/{len(gated)}"
+    # A waived (XFAIL) gate is not a failure: it is a known gap recorded in
+    # realism_metrics.EXPECTED_FAIL with its reason. Only hard failures set exit 1.
+    h_fail = {n: v for n, v in holdouts.items() if v["n_hard_fail"]}
+    print(f"\nSUMMARY  training {n_pass}/{n_gated}"
           + "".join(f"   {n} {v['n_pass']}/{v['n_gated']}" for n, v in holdouts.items())
           + (f"   skipped: {', '.join(skipped)}" if skipped else ""))
-    if n_pass != len(gated) or h_fail:
+    if tr_hard or h_fail:
         if h_fail:
             print(f"FAIL: held-out gates failed on {', '.join(sorted(h_fail))}")
         return 1

@@ -150,8 +150,10 @@ def build_reflectivity_from_boundaries(
     ms_fraction: float = 0.0,
     ms_length_um: float = 120.0,
     speckle_decorrelation: float = 0.0,
+    speckle_corr_lateral_um: float = 0.0,
     texture_field: "CoherentField | None" = None,
     speckle: np.ndarray | None = None,
+    speckle_decorr: np.ndarray | None = None,
     k_shape: float | None = None,
 ) -> np.ndarray:
     """Core reflectivity builder from per-column layer boundaries.
@@ -322,6 +324,7 @@ def build_reflectivity_from_boundaries(
     # don't average it away (that grain-matching is what makes M identifiable), then renormalized
     # to exact per-frame E[tex]=1. Uses a spawned child stream so ``features`` below draw identically
     # whether K-mode is on or off (clean A/B; label map is upstream and unaffected regardless).
+    k_tex = None
     if k_shape is not None and np.isfinite(k_shape):
         try:
             kc = rng.spawn(1)[0]
@@ -345,6 +348,7 @@ def build_reflectivity_from_boundaries(
         tex = np.clip(tex, 0.02, None)
         tex *= 1.0 / (float(np.mean(tex)) + 1e-12)
         g = g * np.sqrt(tex)
+        k_tex = tex
     r += g * backscatter_map
 
     if features:
@@ -354,28 +358,60 @@ def build_reflectivity_from_boundaries(
 
     out = _lateral_beam_filter(r, beam_waist_um / dx_um)
 
-    # Per-A-line speckle decorrelation.
+    # Sub-resolution lateral speckle decorrelation.
     #
-    # Measured on the Maestro2 6 mm / 2048 A-line line scans (2.93 µm pitch, fine enough
-    # that the answer is not aliased by the sampling): real lateral speckle grain is
-    # 3-5 µm, while a 15 µm beam waist predicts ~14 µm and that is what the sim produced.
-    # The real instrument therefore decorrelates its speckle in ~1-2 A-lines, far faster
-    # than its optical spot — scan-during-integration, galvo jitter, and involuntary eye
-    # motion between successive A-lines all randomise the sub-resolution scatterer phases
-    # while the beam is still averaging the same tissue.
-    #
-    # So the fix is NOT to shrink beam_waist_um: that would falsify the instrument's real
-    # lateral resolution for actual structure (vessels, layer boundaries) in order to fix a
-    # statistic of the noise. Instead a fraction of the speckle power is replaced by a
-    # laterally-white realisation riding the same smooth brightness envelope, which leaves
+    # Real lateral speckle grain is finer than the optical spot: a 15 µm waist predicts
+    # ~12 µm and the Maestro corpora measure ~5 µm. The fix is NOT to shrink
+    # beam_waist_um — that would falsify the instrument's real lateral resolution for
+    # actual structure (vessels, layer boundaries) in order to fix a statistic of the
+    # noise. Instead a fraction of the speckle power is replaced by a separately
+    # decorrelated realisation riding the same smooth brightness envelope, which leaves
     # the imaged resolution of deterministic structure untouched.
+    #
+    # That decorrelation length is PHYSICAL, not per-A-line. Measured across seven Maestro
+    # corpora spanning 2.93–23.44 µm of A-line pitch, one correlation length of ~5 µm
+    # reproduces every one of them (RMS 1.4 µm, and ≤0.7 µm on the four line scans, which
+    # are the corpora fine enough to resolve it at all). The apparent growth of the
+    # measured grain at coarse pitch is `realism_metrics._acf_fwhm` bottoming out at its
+    # 0.5 px floor, not a wider grain. The rival "decorrelates in 1–2 A-lines" model — a
+    # laterally *white* realisation, which is what this code used to draw — is a grain of
+    # exactly `dx` and fits those seven corpora almost twice as badly (RMS 2.6 µm).
+    #
+    # The mixture is variance-matched. `_lateral_beam_filter` is sum-normalised, so it
+    # preserves smooth structure but shrinks the speckle variance by Σk², which depends on
+    # `beam_waist_um / dx_um` and therefore on the sampling pitch. Weighting an unfiltered
+    # component against it by √f alone made the *effective* decorrelated fraction 0.54 at
+    # 2.93 µm and 0.13 at 23.44 µm from one nominal f = 0.12 — so both the speckle grain
+    # and the frame brightness moved with the A-line density. Scaling the injected
+    # component by the same √Σk² makes f a true power fraction at every pitch.
+    #
+    # The K-distribution modulator rides the main speckle path, so the decorrelated draw
+    # carries it too: at a large ``f`` most of the speckle comes from this draw, and
+    # without the modulator a profile that fits ``speckle_shape`` would silently get
+    # Rayleigh speckle back. It is divided out of the envelope before being re-applied so
+    # it is not counted twice — ``|r|`` already carries it. Inert in the shipped
+    # ``literature`` profile, where ``speckle_shape`` is None.
     f = float(np.clip(speckle_decorrelation, 0.0, 1.0))
     if f > 0:
-        env = _lateral_beam_filter(np.abs(r).astype(np.complex128),
+        mag = np.abs(r)
+        if k_tex is not None:
+            mag = mag / np.sqrt(k_tex)
+        env = _lateral_beam_filter(mag.astype(np.complex128),
                                    beam_waist_um / dx_um).real
-        g2 = (rng.standard_normal((n_depth, n_x))
-              + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
-        out = np.sqrt(1.0 - f) * out + np.sqrt(f) * env * g2
+        # Like ``speckle``, this draw is slow-axis-correlated for a volume so adjacent
+        # frames share it instead of boiling. It has to be: at the fitted f most of the
+        # speckle comes from here, so a fresh per-frame draw would decorrelate the volume
+        # however densely it was sampled.
+        if speckle_decorr is not None:
+            g2 = speckle_decorr
+        else:
+            g2 = (rng.standard_normal((n_depth, n_x))
+                  + 1j * rng.standard_normal((n_depth, n_x))) / np.sqrt(2.0)
+        g2 = _lateral_corr_filter(g2, speckle_corr_lateral_um / dx_um)
+        if k_tex is not None:
+            g2 = g2 * np.sqrt(k_tex)
+        keep = _beam_variance_keep(beam_waist_um / dx_um)
+        out = np.sqrt(1.0 - f) * out + np.sqrt(f * keep) * env * g2
     return out
 
 
@@ -480,6 +516,53 @@ def build_reflectivity(
         beam_waist_um=beam_waist_um, lateral_extent_um=lateral_extent_um, rng=rng)
 
 
+def _beam_kernel(waist_px: float) -> np.ndarray:
+    """Sum-normalised Gaussian beam field-amplitude kernel ``exp(-t²/w²)``, in pixels."""
+    half = max(1, int(np.ceil(3.0 * waist_px)))
+    t = np.arange(-half, half + 1)
+    k = np.exp(-((t / waist_px) ** 2))
+    return k / k.sum()
+
+
+def _beam_variance_keep(waist_px: float) -> float:
+    """Fraction of a white field's variance surviving :func:`_lateral_beam_filter`.
+
+    Σk² for the sum-normalised beam kernel. The filter preserves smooth structure (Σk = 1)
+    but averages an uncorrelated field down by this factor, which falls as the beam covers
+    more pixels — i.e. it depends on the A-line pitch. Anything mixed against beam-filtered
+    speckle has to be scaled by ``√keep`` or the mixing weight is not a power fraction.
+    """
+    if waist_px <= 0.5:
+        return 1.0
+    k = _beam_kernel(waist_px)
+    return float((k ** 2).sum())
+
+
+def _lateral_corr_filter(g: np.ndarray, sigma_px: float) -> np.ndarray:
+    """Give a white complex field a lateral correlation length, preserving its variance.
+
+    Unlike :func:`_lateral_beam_filter` the kernel is normalised to **Σk² = 1** rather than
+    Σk = 1, because the input is zero-mean noise whose variance must survive rather than a
+    brightness envelope whose level must survive. Filtering a circular-complex-Gaussian
+    field leaves it circular-complex-Gaussian, so the speckle stays fully developed.
+    """
+    if sigma_px <= 0.05 or g.shape[1] < 3:
+        return g
+    half = max(1, int(np.ceil(4.0 * sigma_px)))
+    t = np.arange(-half, half + 1)
+    k = np.exp(-0.5 * (t / sigma_px) ** 2)
+    k = k / np.sqrt((k ** 2).sum())
+    try:
+        from scipy.ndimage import convolve1d
+        return convolve1d(g, k, axis=1, mode="mirror")
+    except Exception:
+        pad = np.pad(g, ((0, 0), (half, half)), mode="reflect")
+        out = np.empty_like(g)
+        for row in range(g.shape[0]):
+            out[row] = np.convolve(pad[row], k, mode="valid")
+        return out
+
+
 def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:
     """Convolve each depth row by the Gaussian beam **amplitude** profile (along x).
 
@@ -494,10 +577,8 @@ def _lateral_beam_filter(r: np.ndarray, waist_px: float) -> np.ndarray:
     """
     if waist_px <= 0.5 or r.shape[1] < 3:
         return r
-    half = max(1, int(np.ceil(3.0 * waist_px)))
-    t = np.arange(-half, half + 1)
-    k = np.exp(-((t / waist_px) ** 2))
-    k = k / k.sum()
+    k = _beam_kernel(waist_px)
+    half = (k.size - 1) // 2
     # Vectorized separable convolution along x via scipy (falls back to numpy):
     # convolve1d over axis=1 in one call instead of a per-depth-row Python loop.
     try:

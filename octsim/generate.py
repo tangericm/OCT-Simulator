@@ -90,7 +90,7 @@ def build_scene(config: SimConfig, rng: np.random.Generator):
     # stamped onto whichever retina builder ran (each has its own constructor).
     if isinstance(scene, RetinaModel):
         scene.pivot_distance_um = float(config.pivot_distance_um)
-        scene.scan_distortion_correction = float(config.scan_distortion_correction)
+        scene.scan_distortion_correction = config.effective_scan_distortion()
     return scene
 
 
@@ -266,7 +266,7 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um,
         cross = scene.cross_section(y_um, x_axis, resolved.source.center_wavelength_nm)
         labels = _rasterize_labels(cross.opt_b, label_depth)   # visible half only
 
-        def build(rng, speckle=None):
+        def build(rng, speckle=None, speckle_decorr=None):
             return build_reflectivity_from_boundaries(
                 cross.opt_b, cross.phys_b, layer_n=cross.layer_n,
                 layer_backscatter=cross.layer_backscatter, layer_mu_t=cross.layer_mu_t,
@@ -280,14 +280,16 @@ def _frame_reflectivity_builder(scene, resolved: ResolvedConfig, x_axis, y_um,
                 boundary_sharpness_um=cross.boundary_sharpness_um,
                 layer_sharpness_um=getattr(cross, "layer_sharpness_um", None),
                 speckle_decorrelation=getattr(cross, "speckle_decorrelation", 0.0),
+                speckle_corr_lateral_um=resolved.speckle_corr_lateral_um,
                 ms_fraction=getattr(cross, "ms_fraction", 0.0),
                 ms_length_um=getattr(cross, "ms_length_um", 120.0),
                 texture_field=cross.texture_field, speckle=speckle,
+                speckle_decorr=speckle_decorr,
                 k_shape=getattr(cross, "speckle_shape", None))
     else:
         labels = _rasterize_labels(scene.optical_boundary_depths_um(x_axis), label_depth)
 
-        def build(rng, speckle=None):
+        def build(rng, speckle=None, speckle_decorr=None):
             return build_reflectivity(scene, depth, x_axis, beam_waist_um=resolved.beam_waist_um,
                                       lateral_extent_um=fov, rng=rng)
     return build, labels
@@ -349,7 +351,7 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
     slow_pitch = float(y_axis[1] - y_axis[0]) if y_axis.size > 1 else 0.0
     waist = max(float(resolved.beam_waist_um), 1e-6)
     speckle_alpha = float(np.exp(-slow_pitch / waist)) if (n_frames > 1 and slow_pitch > 0) else 0.0
-    prev_g = None
+    prev_g = prev_g2 = None
 
     # drawn on the RENDER grid, which is deeper than the visible one when axial_wrap is on
     n_render = int(render_depth.size)
@@ -379,18 +381,25 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
         else:
             dz = phase = wg = None
 
-        # this frame's slow-axis-correlated base speckle (None => builder draws its own)
+        # this frame's slow-axis-correlated base speckle (None => builder draws its own).
+        # The sub-resolution decorrelated component carries its own AR(1) chain: it is a
+        # LATERAL decorrelation, so it must still be shared between adjacent frames or a
+        # densely-sampled volume boils regardless of how fine the slow pitch is.
         if speckle_alpha > 0.0:
             fresh = _draw_speckle(rng)
             g0 = fresh if prev_g is None else (
                 speckle_alpha * prev_g + np.sqrt(1.0 - speckle_alpha ** 2) * fresh)
             prev_g = g0
+            fresh2 = _draw_speckle(rng)
+            g0_dec = fresh2 if prev_g2 is None else (
+                speckle_alpha * prev_g2 + np.sqrt(1.0 - speckle_alpha ** 2) * fresh2)
+            prev_g2 = g0_dec
         else:
-            g0 = None
+            g0 = g0_dec = None
 
-        def one(rng_, speckle):
+        def one(rng_, speckle, speckle_decorr=None):
             spectra = synthesize_bscan_spectra(
-                build(rng_, speckle), src, reference_amp=resolved.reference_amp,
+                build(rng_, speckle, speckle_decorr), src, reference_amp=resolved.reference_amp,
                 falloff_6db_um=resolved.falloff_6db_um,
                 dispersion_coeffs=resolved.dispersion_coeffs, signal_scale=signal_scale,
                 motion_dz_um=dz, washout_gain=wg, column_phase=phase)
@@ -401,13 +410,14 @@ def simulate(config: SimConfig, *, seed=None, rng: np.random.Generator | None = 
             acc = np.zeros((n_depth, n_x))
             for a in range(navg):
                 # keep the frame's coherent base for the first average; redraw the rest
-                recon, noisy = one(rng, g0 if a == 0 else None)
+                recon, noisy = one(rng, g0 if a == 0 else None,
+                                   g0_dec if a == 0 else None)
                 acc += np.abs(recon)
                 if f == 0 and a == 0:
                     first_spectra = noisy
             volume[f] = (acc / navg).astype(np.complex64)
         else:
-            recon, noisy = one(rng, g0)
+            recon, noisy = one(rng, g0, g0_dec)
             volume[f] = recon.astype(np.complex64)
             if f == 0:
                 first_spectra = noisy

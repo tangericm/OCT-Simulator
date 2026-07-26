@@ -625,7 +625,77 @@ GATES = {
     # A-line, which smears real lamination away.
     "inner_swing_db": 2.5,
     "inner_gradient_db": 0.8,
+
+    # --- added in R0c -------------------------------------------------------------------
+    # 27 of the 36 statistics used to be computed, printed, and never gated, so a
+    # regression in any of them was silent. Each tolerance below is set from the REAL
+    # corpora's own frame-to-frame spread and cross-device range, not from the current sim
+    # delta — a gate fitted to today's error only records today's error. Where a gate is
+    # known to fail, it is listed in EXPECTED_FAIL rather than widened until it passes.
+    #
+    # Sag was 150 µm, which was wider than the entire effect it had to resolve: real sag is
+    # 503 µm on Maestro3, 254 µm on Maestro2 and 41 µm on OCTA-500, so a device rendered
+    # with the wrong scan-distortion correction sailed through. 60 µm passes all three
+    # corpora (+7, +21, +14) and catches a device mix-up, which is ~250 µm.
+    "sag_optical_um": 60.0,
+    # Real 5.24 ± 0.12 / 4.87 ± 0.06 — the most stable statistic in the vector, and the
+    # axial partner of the lateral grain gate, which had no counterpart until now.
+    "speckle_grain_axial_um": 1.0,
+    # Real 25.5 ± 2.9 / 42.6 ± 4.8 — the real value nearly doubles between devices, so this
+    # cannot be tight. 15 still catches the −27.8 the pre-R0a speckle model produced.
+    "band_above_floor_db.onl": 4.0,
+    "shadow_count": 15.0,
+    "column_energy_sd_db": 0.8,
+    # Guards the per-device noise wiring (R0b): if an instrument's SNR stops reaching the
+    # renderer, every band's height above the floor moves and this is where it shows.
+    "median_tissue_snr_db": 3.0,
+    # --- gated but known-failing; see EXPECTED_FAIL ---
+    "choroid_dark_frac_4db": 0.010,
+    "inner_extrema": 1.0,
+    "rpe_peak_separation_um": 18.0,
 }
+
+#: ``(corpus, metric)`` pairs that are gated but known to fail **today**, with the reason.
+#:
+#: The alternative to this is widening the tolerance until the gate passes, which converts a
+#: known gap into a silent one — the exact failure mode R0c exists to remove. A waived gate
+#: is reported as ``XFAIL`` and does not fail the run; if it starts passing it is reported as
+#: ``XPASS``, which is a prompt to delete the entry rather than a failure.
+EXPECTED_FAIL = {
+    ("training", "choroid_dark_frac_4db"):
+        "sim choroid holds ~7x too many locally-dark voxels (real 0.004, sim 0.030): the "
+        "lumens are rounder and more separated than the real vertical striation. Needs the "
+        "choroidal vasculature model, not a tolerance change.",
+    ("octa500", "inner_extrema"):
+        "sim inner retina resolves 2.4 extrema against a real 4.9 in the display domain, "
+        "while matching 3.0 vs 3.0 on Maestro2. Under-lamination that only the tone-curved "
+        "corpus is sensitive to; a joint (mu, backscatter) fit (R1) is the fix.",
+    ("octa500", "speckle_grain_axial_um"):
+        "real 3.13 um vs sim 5.40, while the two raw-domain corpora agree to 0.2 um. Axial "
+        "grain is set by the source bandwidth, and OCTA-500 has no instrument model, so it "
+        "is rendered with Maestro3's source — this compares two devices' axial PSFs. Its "
+        "axial pitch is also solved rather than measured, so the um scale is itself "
+        "derived. Fix by giving the corpus an instrument model, not by widening the gate; "
+        "until then this says nothing about the tissue model.",
+    ("octid", "rpe_peak_separation_um"):
+        "real 13.3 um vs sim 40.6. The one gate the compressed tier can carry, and it fails: "
+        "sim always resolves exactly 2 RPE-complex peaks at a fixed spacing while heavily "
+        "JPEG-compressed real data merges them. Do not widen — it would un-gate octid again.",
+}
+
+
+def gate_outcome(passed: bool | None, corpus: str = "", metric: str = "") -> str | None:
+    """``PASS`` / ``FAIL`` / ``XFAIL`` / ``XPASS`` for one gated metric.
+
+    ``None`` for an ungated metric. ``XFAIL`` is a waived known failure; ``XPASS`` is a
+    waiver that is no longer needed.
+    """
+    if passed is None:
+        return None
+    waived = (corpus, metric) in EXPECTED_FAIL
+    if not waived:
+        return "PASS" if passed else "FAIL"
+    return "XPASS" if passed else "XFAIL"
 
 
 def compare(real: dict, sim: dict) -> list[tuple]:
@@ -649,12 +719,15 @@ def compare(real: dict, sim: dict) -> list[tuple]:
     return rows
 
 
-def format_table(rows: list[tuple]) -> str:
-    """Render :func:`compare` output as a fixed-width table."""
+def format_table(rows: list[tuple], corpus: str = "") -> str:
+    """Render :func:`compare` output as a fixed-width table.
+
+    ``corpus`` enables the :data:`EXPECTED_FAIL` waivers, which are keyed by corpus name.
+    """
     out = [f"{'metric':<34}{'real':>12}{'sim':>12}{'delta':>10}{'tol':>8}  gate",
            "-" * 84]
     for k, rm, rs, sm, ss, delta, tol, passed in rows:
-        gate = "" if passed is None else ("PASS" if passed else "FAIL")
+        gate = gate_outcome(passed, corpus, k) or ""
         tol_s = "" if tol is None else f"{tol:.3g}"
         out.append(f"{k:<34}{rm:>8.3f}±{rs:<3.2g}{sm:>8.3f}±{ss:<3.2g}"
                    f"{delta:>+10.3f}{tol_s:>8}  {gate}")

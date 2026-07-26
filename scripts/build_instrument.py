@@ -294,13 +294,29 @@ def build(folder: str, mirror: str | None, name: str, lambda0_nm: float = LAMBDA
         falloff_6db_um = float(falloff_um)
         print(f"  no mirror; using supplied falloff_6db={falloff_6db_um:.0f}um (NOT measured)")
 
+    # `scan_distortion_correction` and `snr_db` are measured elsewhere — the first against a
+    # nominal 6 mm B-scan's sag, the second from the corpus's own SNR metadata — so this
+    # builder cannot produce them. Carry the existing values across instead of resetting
+    # them to the dataclass defaults, which would silently un-do R0b on the next rebuild.
+    prior = {}
+    try:
+        from octsim.instrument import load_instrument
+        p = load_instrument(name)
+        prior = dict(scan_distortion_correction=p.scan_distortion_correction,
+                     snr_db=p.snr_db)
+        if prior["scan_distortion_correction"] is not None or prior["snr_db"]:
+            print(f"  carrying over device numbers: distortion="
+                  f"{prior['scan_distortion_correction']}, snr_db={prior['snr_db']:.2f}")
+    except Exception:
+        pass
+
     inst = Instrument(
         name=name, center_wavelength_nm=float(lambda0_nm), n_k=PIX,
         bandwidth_fwhm_nm=bandwidth_fwhm_nm, k_span_factor=k_span_factor,
         power_envelope=env, background=None,
         reference_amp=reference_amp, read_floor=float(np.clip(read_std / 255.0, 1e-3, 0.2)),
         floor_db=-60.0, falloff_6db_um=falloff_6db_um, axial_fwhm_um=axial_fwhm_um,
-        source=f"measured:{os.path.basename(folder)}")
+        source=f"measured:{os.path.basename(folder)}", **prior)
     return inst
 
 

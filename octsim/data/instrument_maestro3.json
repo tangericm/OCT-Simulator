@@ -2060,5 +2060,7 @@
   "floor_db": -60.0,
   "falloff_6db_um": 1959.943928611281,
   "axial_fwhm_um": 15.48,
+  "scan_distortion_correction": 0.86,
+  "snr_db": 52.04221179196247,
   "source": "measured:6mm_1024Aline"
 }
