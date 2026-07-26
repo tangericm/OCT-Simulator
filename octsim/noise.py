@@ -23,13 +23,21 @@ import numpy as np
 class NoiseModel:
     """Relative strengths of the three noise components (0 disables a term).
 
-    The coefficients are dimensionless multipliers on a spectrum whose DC-removed
-    interferometric term is O(1); ``read`` is relative to the mean source power.
+    ``shot`` and ``rin`` are dimensionless multipliers on the spectrum (``sqrt(I)`` and
+    ``I`` respectively). ``read`` is an **absolute** per-pixel electronic standard
+    deviation in the same units as the spectrum.
+
+    Read noise used to be scaled by ``mean(|spectrum|)``, which is dominated by the
+    reference term ``P(k)·a_ref²``. That made the "non-optical electronic floor" grow with
+    the reference-arm power, so raising ``reference_amp`` raised the noise in step and SNR
+    was independent of reference power — the opposite of a real SD-OCT system, where
+    increasing reference power improves SNR up to the shot-noise limit. It also meant the
+    floor could not be grounded in the measured ``Instrument.read_floor``.
     """
 
     shot: float = 0.0
     rin: float = 0.0
-    read: float = 0.0
+    read: float = 0.0            # absolute per-pixel std (not a fraction of the spectrum)
 
     @classmethod
     def typical(cls) -> "NoiseModel":
@@ -50,11 +58,10 @@ class NoiseModel:
         if not (self.shot or self.rin or self.read):
             return spectrum
         out = spectrum.astype(np.float64, copy=True)
-        scale = float(np.mean(np.abs(spectrum))) or 1.0
         if self.shot:
             out += self.shot * np.sqrt(np.abs(spectrum)) * rng.standard_normal(spectrum.shape)
         if self.rin:
             out += self.rin * np.abs(spectrum) * rng.standard_normal(spectrum.shape)
         if self.read:
-            out += self.read * scale * rng.standard_normal(spectrum.shape)
+            out += self.read * rng.standard_normal(spectrum.shape)
         return out

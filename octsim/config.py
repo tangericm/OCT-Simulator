@@ -55,9 +55,12 @@ class ResolvedConfig:
     geometry: ScanGeometry
     timing: Timing
     beam_waist_um: float
+    pivot_distance_um: float
+    scan_distortion_correction: float
     reference_amp: float
     dispersion_coeffs: list[float]     # derived from the SimConfig.dispersion knob
     falloff_6db_um: float
+    axial_wrap: bool
     noise: NoiseModel
     averages: int
     motion_level: float
@@ -90,6 +93,22 @@ class SimConfig:
     lateral_fov_um: float = 1000.0
     lines_per_frame: int = 512
     lateral_resolution_um: float = 0.0      # >0 specify; 0 -> use beam_waist_um
+    #: Distance from the scan pivot (near the pupil) to the retina, µm. Drives the
+    #: fan-beam sag term. This is SCAN GEOMETRY, not anatomy, and it is device-specific:
+    #: measured B-scan sag over a nominal 6 mm scan is ~504 µm on the Maestro3 corpus but
+    #: ~249 µm on Maestro2 — less than the anatomic term alone — because vendors apply
+    #: different amounts of scan-distortion correction. Fitting it once and baking it into
+    #: the retina model made every held-out corpus over-curve. 0 disables the term.
+    pivot_distance_um: float = 20000.0
+    #: Fraction of the geometric sag (anatomic bowl + fan-beam) that survives the vendor's
+    #: scan-distortion correction. 1.0 = raw geometry, 0.0 = fully flattened.
+    #: MEASURED per device against a nominal 6 mm B-scan, raw geometric sag ~585 µm:
+    #:   Maestro3  504 µm -> 0.86      Maestro2  249 µm -> 0.43
+    #:   OCTA-500   41 µm -> 0.28 (at 3 mm)
+    #: Devices differ by more than 2x, so this cannot be a universal constant; it is the
+    #: single knob that made every held-out corpus over-curve when it was baked in at the
+    #: Maestro3 value. Calibrate it per corpus, do not fit it globally.
+    scan_distortion_correction: float = 0.86
     beam_waist_um: float = 15.0
     slow_fov_um: float = 500.0              # slow (y) axis FOV for a volume
     n_frames: int = 32                      # frames in a volume (forced to 1 for bscan)
@@ -104,13 +123,26 @@ class SimConfig:
     # magnitude = more axial stretch/blur; sign flips the chirp direction.
     dispersion: float = 0.0
     falloff_6db_um: float = 0.0             # 0 -> no roll-off
+    #: render the scene onto the full n_k depth grid so structure deeper than z_max
+    #: aliases back into the image, as it does on a real device (disc scans, and any
+    #: mis-positioned retina). Costs one extra factor of 2 on the reflectivity build.
+    axial_wrap: bool = True
 
     # --- noise ---
     noise_free: bool = False
     noise_level: float = 1.0
-    shot: float = 0.03
-    rin: float = 0.005
-    read: float = 0.01
+    # Noise coefficients, all calibrated together against the Maestro3 6 mm corpus
+    # (scripts/validate_realism.py, and the device's own measured SNR of 52.0 dB recorded
+    # in octsim/data/texture_maestro3_macula_meta.json). The previous values put every
+    # tissue band ~11 dB closer to the noise floor than real data: the inner retina sat
+    # 7 dB above the floor where real sits at 18 dB, and half the neurosensory retina was
+    # within 3 dB of the floor. The floor here is shot-dominated, so all three had to move
+    # together — cutting the read term alone changes the floor by ~1 dB.
+    shot: float = 0.0075
+    rin: float = 0.00125
+    #: read-noise coefficient, as a fraction of the reference-arm DC level (see
+    #: :meth:`_resolve_noise` — it is converted to an absolute std at resolve time).
+    read: float = 0.0025
     target_snr_db: float = 0.0              # >0 -> back-solve the read floor
     averages: int = 1                       # incoherent B-scan averages (1 = raw; >1 = ART-like)
 
@@ -242,6 +274,7 @@ class SimConfig:
         # 2b) instrument overlay (Tier 1, measured + frozen): replace the closed-form Gaussian
         #     source with the device's measured envelope P(k) and its grounded λ0/n_k/BW/k-span.
         #     Empty instrument -> unchanged. The measured envelope aligns to this source's k_grid.
+        inst = None
         if self.instrument:
             try:
                 from .instrument import load_instrument
@@ -252,7 +285,7 @@ class SimConfig:
                 bw = source.bandwidth_fwhm_nm
                 k_span = source.k_span_factor
             except Exception:
-                pass                    # missing/invalid instrument -> keep the Gaussian source
+                inst = None             # missing/invalid instrument -> keep the Gaussian source
 
         # 3) lateral resolution <-> beam waist
         if self.lateral_resolution_um > 0:
@@ -269,7 +302,7 @@ class SimConfig:
             n_frames=geometry.n_frames, duty_cycle=self.duty_cycle,
             flyback_time_s=self.flyback_time_s)
 
-        noise = self._resolve_noise()
+        noise = self._resolve_noise(source, inst)
 
         derived = {
             "bandwidth_fwhm_nm": bw,
@@ -291,8 +324,10 @@ class SimConfig:
 
         return ResolvedConfig(
             source=source, geometry=geometry, timing=timing, beam_waist_um=beam_waist,
+            pivot_distance_um=self.pivot_distance_um,
+            scan_distortion_correction=self.scan_distortion_correction,
             reference_amp=self.reference_amp, dispersion_coeffs=disp_coeffs,
-            falloff_6db_um=self.falloff_6db_um,
+            falloff_6db_um=self.falloff_6db_um, axial_wrap=bool(self.axial_wrap),
             noise=noise, averages=self.averages,
             motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
             phase_drift_rad=self.phase_drift_rad, cardiac=self.cardiac,
@@ -300,14 +335,36 @@ class SimConfig:
             scan_pattern=self.scan_pattern, sample_depth_um=self.sample_depth_um,
             sample_lateral_offset_um=self.sample_lateral_offset_um, derived=derived)
 
-    def _resolve_noise(self) -> NoiseModel:
+    def _resolve_noise(self, source=None, instrument=None) -> NoiseModel:
+        """Build the noise model. ``NoiseModel.read`` is an ABSOLUTE per-pixel std.
+
+        ``self.read`` stays a dimensionless coefficient for backwards compatibility; it is
+        converted here against the reference-arm DC level ``mean(P(k))·a_ref²``, which is
+        what ``mean(|spectrum|)`` used to stand in for. Doing the conversion once at
+        resolve time (rather than per frame, against the scene) makes the floor a property
+        of the instrument instead of a property of whatever tissue is in view.
+
+        Note ``Instrument.read_floor`` is deliberately NOT adopted here: it is written as
+        ``read_std / 255`` (an 8-bit FPN scale, ``scripts/build_instrument.py``), which is
+        not commensurate with the reference-DC units used above. Adopting it directly
+        raises the floor ~11x and drives the whole retina into the noise. Grounding the
+        floor in it needs that measurement re-expressed in spectrum units first.
+        """
         if self.noise_free or self.noise_level <= 0:
             return NoiseModel.none()
         lvl = self.noise_level
-        read = self.read
+
+        ref_dc = float(self.reference_amp) ** 2
+        if source is not None:
+            try:
+                ref_dc *= float(np.mean(source.power_spectrum(source.k_grid())))
+            except Exception:
+                pass
+
+        read = float(self.read) * ref_dc
         if self.target_snr_db > 0:
             # background dominated by the read floor: SNR ≈ 20·log10(ref / read)
-            read = self.reference_amp * 10.0 ** (-self.target_snr_db / 20.0)
+            read = ref_dc * 10.0 ** (-self.target_snr_db / 20.0)
         return NoiseModel(shot=self.shot * lvl, rin=self.rin * lvl, read=read * lvl)
 
     # ------------------------------------------------------------------ serialize

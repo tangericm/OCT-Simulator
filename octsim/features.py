@@ -38,8 +38,15 @@ class BloodVessel:
     plexus_offset_um: float = 0.0    # EXTRA depth below "top tucked under the ILM"
     slope: float = 0.0
     y_half_extent_um: float = 1e9
-    shadow_od: float = 1.2
-    lumen_gain: float = 0.15
+    #: Whole-blood attenuation coefficient (1/µm, amplitude) at ~840 nm. Scattering-
+    #: dominated. 0.016/µm = 16/mm sits in the published range for whole blood in the NIR
+    #: and reproduces the deepest shadows measured on the Maestro3 corpus (~-14 dB under a
+    #: ~100 µm vessel: 20·log10(exp(-2·0.016·100)) = -13.9 dB).
+    mu_blood_per_um: float = 0.016
+    #: lumen reflectivity relative to the surrounding tissue — blood scatters MORE, not less
+    lumen_scatter: float = 1.35
+    #: free multiplier on the blood attenuation, for calibration only (1.0 = physical)
+    shadow_scale: float = 1.0
     #: brightness of the hyperreflective vessel wall (relative reflectivity) — subtle
     wall_amp: float = 1.6e-2
 
@@ -68,22 +75,199 @@ class BloodVessel:
 
         lumen = (rr <= 1.0) & not_vitreous
         wall = (rr > 1.0) & (rr <= 1.4) & not_vitreous             # thin hyperreflective wall ring
-        r[lumen] *= self.lumen_gain
+
+        # Blood is a STRONG SCATTERER, which is the reason the shadow exists at all. The
+        # lumen is therefore made *more* reflective than the surrounding neural tissue, not
+        # less; the dark appearance of a vessel on a B-scan is the attenuation accumulating
+        # through the blood column, not an absence of scatterers. Rendering the lumen as a
+        # low-reflectivity hole (the previous model) is self-contradictory: it removes the
+        # scatterers and then imposes a shadow by hand.
+        #
+        # Both the intra-lumen decay and the shadow below now come from one coefficient.
+        # Vertical chord through the ellipse at each lateral position:
+        #     half_chord(x) = z_half · sqrt(1 - ((x-xv)/x_half)²)
+        # so the lateral shadow profile falls out of the geometry instead of being a
+        # hand-tuned Gaussian, and the caliber dependence is automatic.
+        inside_x = np.clip(1.0 - ((x - xv) / x_half) ** 2, 0.0, None)
+        half_chord = z_half * np.sqrt(inside_x)                    # [n_x]
+        mu = self.mu_blood_per_um * self.shadow_scale
+
+        # attenuation accumulated from the lumen's front wall down to each depth
+        front = center_z - half_chord[None, :]
+        path = np.clip(depth[:, None] - front, 0.0, 2.0 * half_chord[None, :])
+        atten = np.exp(-mu * path)                                 # amplitude, one-way·2 below
+        r *= np.where(not_vitreous, atten, 1.0)
+
+        r[lumen] *= self.lumen_scatter
         if self.wall_amp > 0:
             n = int(np.count_nonzero(wall))
             if n:
                 g = (ctx.rng.standard_normal(n) + 1j * ctx.rng.standard_normal(n)) / np.sqrt(2.0)
                 r[wall] += self.wall_amp * g
 
-        # posterior shadow: begins at the vessel's BACK wall, tapers laterally, and
-        # deepens with caliber (longer blood path -> more attenuation). The vertical onset
-        # ramps in gradually over ~one caliber (a hard step reads as an unphysical blob edge
-        # that is not seen in frame-averaged clinical B-scans).
-        od = self.shadow_od * (0.6 + 0.5 * min(cal / 120.0, 1.5))
-        lateral = np.exp(-((x - xv) / (0.6 * cal)) ** 2)[None, :]  # [1, n_x]
-        onset = max(0.5 * cal, 4.0 * ctx.dz)
-        below = np.clip((depth[:, None] - (center_z + z_half)) / onset, 0.0, 1.0)
-        r *= 1.0 - (1.0 - np.exp(-od)) * lateral * below
+
+@dataclass
+class LaminaCribrosa:
+    """The laminar / prelaminar block filling the neural canal.
+
+    Real disc B-scans do not show a uniform grey plug inside the canal. They show
+    prelaminar tissue that fades with depth, then the lamina cribrosa as a distinctly
+    brighter, laterally-striated slab (the collagenous beams between the pores), below
+    which the signal terminates. A single flat ``disc_fill_backscatter`` reproduces none
+    of that and is the main reason a simulated disc reads as a grey notch.
+
+    Applied as a multiplicative field inside the canal radius, so it composes with the
+    canal layer's own backscatter and attenuation.
+    """
+
+    disc_x_um: float
+    disc_y_um: float
+    radius_um: float
+    top_opt: np.ndarray            # [n_x] optical depth of the canal top (the cup floor)
+    depth_um: float = 260.0        # optical depth below the cup at which the lamina sits
+    thickness_um: float = 170.0    # laminar slab thickness (optical µm)
+    gain: float = 2.6              # laminar brightness relative to prelaminar tissue
+    prelaminar_fade: float = 520.0 # e-folding depth of the prelaminar fade (optical µm)
+    pore_um: float = 55.0          # lateral period of the laminar pore striation
+
+    def apply(self, r: np.ndarray, ctx) -> None:
+        x = ctx.x_axis_um
+        depth = ctx.depth_axis_um
+        dy = abs(ctx.y_um - self.disc_y_um)
+        if dy >= self.radius_um:
+            return
+        # in-plane canal radius at this slow position
+        rad = self.radius_um * np.sqrt(max(1.0 - (dy / self.radius_um) ** 2, 0.0))
+        if rad < 1.0:
+            return
+        inside = np.clip(1.0 - _smooth01((np.abs(x - self.disc_x_um) - rad * 0.75)
+                                         / max(rad * 0.35, 1.0)), 0.0, 1.0)[None, :]
+        if not np.any(inside > 0):
+            return
+        below = depth[:, None] - self.top_opt[None, :]
+
+        # prelaminar tissue: fades with depth below the cup floor
+        gain = np.where(below > 0.0, np.exp(-np.clip(below, 0.0, None) / self.prelaminar_fade), 1.0)
+
+        # laminar slab: brighter, with a lateral pore striation
+        lam = _smooth01((below - self.depth_um) / 40.0) * (
+            1.0 - _smooth01((below - self.depth_um - self.thickness_um) / 40.0))
+        stri = 1.0 + 0.45 * np.cos(2.0 * np.pi * x / max(self.pore_um, 1.0))[None, :]
+        gain = gain * (1.0 + (self.gain * stri - 1.0) * lam)
+
+        r *= 1.0 + (gain - 1.0) * inside
+
+
+def _smooth01(t):
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+@dataclass
+class ChoroidLumen:
+    """One choroidal vessel lumen, as a 3-D ellipsoid.
+
+    Stored in the anatomy model and cross-sectioned per frame, so the choroidal vascular
+    pattern is a fixed 3-D structure that evolves smoothly through a volume rather than a
+    fresh random field per B-scan.
+
+    ``z_rel`` is the position within the choroid band (0 = Bruch's membrane, 1 = the
+    choroid-sclera interface), so lumens ride the RPE contour instead of sitting at an
+    absolute depth.
+    """
+
+    x0_um: float
+    y0_um: float
+    z_rel: float
+    rx_um: float
+    ry_um: float
+    rz_um: float
+    gain: float = 0.25           # residual reflectivity inside the lumen
+
+
+@dataclass
+class ChoroidVasculature:
+    """Stratified choroid: choriocapillaris band + Sattler/Haller vessel lumens.
+
+    Replaces a Gaussian-smoothed random gain field. That field could reproduce roughly the
+    right *amount* of choroidal variation but never the right *kind*: its structure was
+    isotropic and smooth-edged, measuring a ~50 µm lateral correlation length where real
+    choroid is sharp-edged, and it produced almost none of the deep dark lumina that
+    dominate a real choroid's appearance.
+
+    Lumens are rasterised with a hard edge (a smoothstep one resolution cell wide), which
+    is the whole point — a Gaussian blob and a sharp-walled vessel have very different
+    intensity histograms even at identical variance.
+    """
+
+    top_opt: np.ndarray          # [n_x] optical depth of the choroid top (per column)
+    bot_opt: np.ndarray          # [n_x] optical depth of the choroid bottom
+    lumens: list                 # list[ChoroidLumen]
+    #: 0 disables the legacy in-choroid CC gain; BM+CC is now its own layer (see
+    #: octsim.anatomy.retina.RETINA_LAYERS), which is where it belongs.
+    cc_thickness_um: float = 0.0
+    cc_gain: float = 1.0
+    edge_um: float = 6.0              # lumen wall softness
+
+    def apply(self, r: np.ndarray, ctx) -> None:
+        depth = ctx.depth_axis_um
+        x = ctx.x_axis_um
+        n_depth, n_x = r.shape
+        top = self.top_opt[None, :]
+        bot = self.bot_opt[None, :]
+        d = depth[:, None]
+        band = (d >= top) & (d < bot)
+        if not np.any(band):
+            return
+        dz = ctx.dz
+        r0 = max(0, int(np.floor(self.top_opt.min() / dz)))
+        r1 = min(n_depth, int(np.ceil(self.bot_opt.max() / dz)) + 1)
+        if r1 <= r0:
+            return
+
+        sub = slice(r0, r1)
+        thick = np.maximum(bot - top, 1e-6)
+        z_rel = (d[sub] - top) / thick                      # 0 at BM, 1 at the sclera
+        gain = np.ones((r1 - r0, n_x))
+
+        # choriocapillaris: a thin bright band hugging Bruch's membrane
+        cc = (d[sub] - top) < self.cc_thickness_um
+        gain = np.where(cc & band[sub], self.cc_gain, gain)
+
+        y = ctx.y_um
+        e = max(self.edge_um, 1e-6)
+        x_lo, x_hi = (float(x[0]), float(x[-1])) if n_x else (0.0, 0.0)
+        if x_lo > x_hi:
+            x_lo, x_hi = x_hi, x_lo
+        for lu in self.lumens:
+            dy = abs(y - lu.y0_um)
+            if dy >= lu.ry_um:
+                continue                                     # this B-scan misses the vessel
+            # Laterally off-frame lumens are EXACTLY a no-op, not an approximation: outside
+            # the wall the smoothstep saturates at 1 and the gain factor becomes
+            # lu.gain + (1 - lu.gain)*1 == 1. Skipping them is free correctness. It matters
+            # because the vessel bed is drawn over a field wide enough for any scan width,
+            # so on a 6 mm frame about half the y-surviving lumens contribute nothing and
+            # were still costing a full [n_band, n_x] multiply each.
+            if lu.x0_um + lu.rx_um <= x_lo or lu.x0_um - lu.rx_um >= x_hi:
+                continue
+            # elliptical foreshortening: the in-plane cross-section of an ellipsoid
+            shrink = np.sqrt(max(1.0 - (dy / lu.ry_um) ** 2, 0.0))
+            rx = lu.rx_um * shrink
+            rz = lu.rz_um * shrink
+            if rx < 1.0 or rz < 1.0:
+                continue
+            zc = lu.z_rel * thick + top                      # follows the RPE contour
+            # normalised radius; distance is measured in µm so the edge width is physical
+            rr = np.sqrt(((x[None, :] - lu.x0_um) / rx) ** 2
+                         + ((d[sub] - zc) / rz) ** 2)
+            # hard-edged: smoothstep across one wall width, not a Gaussian falloff
+            t = np.clip((rr - 1.0) * (min(rx, rz) / e) + 1.0, 0.0, 1.0)
+            wall = t * t * (3.0 - 2.0 * t)                   # 0 inside, 1 outside
+            gain *= lu.gain + (1.0 - lu.gain) * wall
+
+        # r[sub] is a basic slice (a view), so the masked in-place multiply writes through
+        r[sub][band[sub]] *= gain[band[sub]]
 
 
 @dataclass

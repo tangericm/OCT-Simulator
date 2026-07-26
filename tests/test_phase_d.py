@@ -122,8 +122,9 @@ def test_spectra_are_retained_and_reconstruct_the_bscan():
     assert res.spectra.shape == (n_k, 96)             # [pixels/spectrum, lines]
     assert res.k_axis_rad_per_um.shape == (n_k,)
     peak = np.abs(res.volume).max()
+    assert res.dc_background is not None               # the reference spectrum P(k)·a_ref²
     for col in (10, 48, 80):
-        recon = np.abs(reconstruct_bscan(res.spectra[:, col]))
+        recon = np.abs(reconstruct_bscan(res.spectra[:, col], background=res.dc_background))
         recon_db = np.clip(20 * np.log10(np.maximum(recon.ravel() / peak, 1e-12)), -60, 0)
         assert np.max(np.abs(recon_db - res.ascan_db(col))) < 1e-3
 
