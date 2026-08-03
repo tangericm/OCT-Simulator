@@ -24,6 +24,11 @@ There is a **programmatic API** and a **PySide6 GUI**.
 The label map above is a byproduct of rendering, not a separate annotation
 step — every generated sample ships one.
 
+Both figures are rendered against the bundled measured instrument model
+(`SimConfig(instrument="device_a")`), which supplies a real source spectrum,
+sensitivity fall-off, SNR, and scan distortion in place of the closed-form
+Gaussian default. Reproduce them with `python examples/render_figures.py`.
+
 <p align="center"><img src="docs/assets/gallery.jpg" alt="Gallery of mirror, paper, cornea, and macula presets" width="900"></p>
 
 ## Quickstart

@@ -27,6 +27,17 @@ from octsim import SimConfig, simulate  # noqa: E402
 DEFAULT_OUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "assets")
 
+#: Render against the MEASURED device model rather than the closed-form Gaussian default.
+#: `instrument="device_a"` supplies the measured source spectrum P(k), sensitivity
+#: fall-off, SNR, and scan distortion — the difference between a generic-looking frame and
+#: one that reads like a real B-scan. Motion is left at its default 0.0: a non-zero
+#: motion_level is physically correct but its washout streaks dominate a still figure.
+INSTRUMENT = "device_a"
+
+#: display window (dB). -50 matches the contrast a device shows; -55 stretches the noise
+#: floor bright enough to grey out the vitreous.
+VMIN_DB = -50.0
+
 #: the four scenes in the gallery panel — two bench targets, then tissue
 GALLERY = [
     ("mirror", dict(anatomy="mirror")),
@@ -38,6 +49,21 @@ GALLERY = [
 
 def _extent(res):
     return [res.x_axis_um[0], res.x_axis_um[-1], res.depth_axis_um[-1], res.depth_axis_um[0]]
+
+
+def _tissue_rows(res, pad_um: float = 260.0):
+    """Depth rows spanned by labelled tissue, padded. Keeps the frame off the empty window.
+
+    The axial range runs well past the retina, so an uncropped frame renders the tissue as
+    a thin strip in a field of noise floor. The label map already says where the tissue is.
+    """
+    rows = np.nonzero(res.labels2d.any(axis=1))[0]
+    dz = float(res.depth_axis_um[1] - res.depth_axis_um[0])
+    pad = int(round(pad_um / max(dz, 1e-9)))
+    n = res.labels2d.shape[0]
+    if rows.size == 0:
+        return 0, n
+    return max(int(rows[0]) - pad, 0), min(int(rows[-1]) + pad, n)
 
 
 def _save(fig, out, name):
@@ -56,22 +82,25 @@ def _save_arrays(res, out, name):
 
 def macula(out: str, save_arrays: bool = False) -> None:
     """A 6 mm macular B-scan and the per-pixel layer labels that ship with it."""
-    cfg = SimConfig(anatomy="macula", lateral_fov_um=6000.0, lines_per_frame=768,
-                    motion_level=1.0, noise_level=1.0)
-    res = simulate(cfg, seed=3)
-    ext = _extent(res)
+    cfg = SimConfig(anatomy="macula", instrument=INSTRUMENT, shape_model="octa500",
+                    lateral_fov_um=6000.0, lines_per_frame=1024, sample_depth_um=640.0)
+    res = simulate(cfg, seed=11)
+    r0, r1 = _tissue_rows(res)
+    dz = float(res.depth_axis_um[1] - res.depth_axis_um[0])
+    ext = [res.x_axis_um[0] / 1000.0, res.x_axis_um[-1] / 1000.0, r1 * dz, r0 * dz]
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=160)
-    ax.imshow(res.bscan_db, cmap="gray", aspect="auto", extent=ext, vmin=-55, vmax=0)
-    ax.set_xlabel("lateral (µm)")
+    fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=170)
+    ax.imshow(res.bscan_db[r0:r1], cmap="gray", aspect="auto", extent=ext,
+              vmin=VMIN_DB, vmax=0)
+    ax.set_xlabel("lateral (mm)")
     ax.set_ylabel("optical depth (µm)")
     fig.tight_layout()
     _save(fig, out, "macula-bscan.jpg")
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=160)
-    ax.imshow(res.labels2d, cmap="nipy_spectral", aspect="auto", extent=ext,
-              vmin=0, vmax=max(int(res.labels2d.max()), 1))
-    ax.set_xlabel("lateral (µm)")
+    fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=170)
+    ax.imshow(res.labels2d[r0:r1], cmap="nipy_spectral", aspect="auto", extent=ext,
+              vmin=0, vmax=max(int(res.labels2d.max()), 1), interpolation="nearest")
+    ax.set_xlabel("lateral (mm)")
     ax.set_ylabel("optical depth (µm)")
     fig.tight_layout()
     _save(fig, out, "macula-labels.jpg")
@@ -84,11 +113,15 @@ def gallery(out: str, save_arrays: bool = False) -> None:
     """One panel per preset, all on the same display window."""
     fig, axes = plt.subplots(1, len(GALLERY), figsize=(4.2 * len(GALLERY), 4.4), dpi=150)
     for ax, (name, kw) in zip(axes, GALLERY):
-        res = simulate(SimConfig(lines_per_frame=512, **kw), seed=1)
-        ax.imshow(res.bscan_db, cmap="gray", aspect="auto",
-                  extent=_extent(res), vmin=-55, vmax=0)
+        res = simulate(SimConfig(lines_per_frame=512, instrument=INSTRUMENT, **kw), seed=1)
+        r0, r1 = _tissue_rows(res, pad_um=360.0)
+        dz = float(res.depth_axis_um[1] - res.depth_axis_um[0])
+        ax.imshow(res.bscan_db[r0:r1], cmap="gray", aspect="auto",
+                  extent=[res.x_axis_um[0] / 1000.0, res.x_axis_um[-1] / 1000.0,
+                          r1 * dz, r0 * dz],
+                  vmin=VMIN_DB, vmax=0)
         ax.set_title(name)
-        ax.set_xlabel("lateral (µm)")
+        ax.set_xlabel("lateral (mm)")
         if save_arrays:
             _save_arrays(res, out, name)
     axes[0].set_ylabel("optical depth (µm)")
