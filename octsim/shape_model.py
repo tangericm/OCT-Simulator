@@ -5,7 +5,7 @@ extracted from real, segmented B-scans. It captures the population mean geometry
 foveal-pit morphology, and the correlated layer-thickness variation across eyes — the
 things a hand-tuned parametric pit cannot reproduce. Sampling draws latent coefficients
 ``z ~ N(0, 1)`` and returns a plausible new thickness field; :func:`fit` builds one from a
-``[N, n_layer, n_ecc]`` stack (see :mod:`octsim.data.duke_dme` for a real loader).
+``[N, n_layer, n_ecc]`` stack, whichever segmented corpus it was measured from.
 
 The learned model is tiny (a few KB) and travels with the repo as an ``.npz`` artifact; the
 raw datasets do not. Nothing here touches labels — the sampled geometry still drives the

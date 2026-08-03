@@ -57,7 +57,7 @@ class RetinaLayer:
 
 # Foveal avascular zone radius: the central capillary-free region that superficial vessels
 # ring but do not cross. OCTA-500 normal 3mm eyes measure a median FAZ area ~0.33 mm²
-# (equivalent radius ~324 µm; octsim/data/octa500_macula.json).
+# (equivalent radius ~324 µm), measured off the OCTA-500 3 mm FAZ ground truth.
 FAZ_RADIUS_UM = 320.0
 
 #: Axial reflectivity-transition width for the photoreceptor bands and the RPE. These
