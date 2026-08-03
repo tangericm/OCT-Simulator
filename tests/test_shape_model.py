@@ -88,16 +88,19 @@ def test_retina_from_shape_model_has_data_pit():
 
 
 def test_config_default_normal_shape_model():
-    # the default shape_model="normal" (JHU healthy-eye) yields a data-driven foveal pit
+    # default shape_model="normal" (OCTA-500) yields a data-driven foveal pit.
+    # Assert on anatomy cross-section thicknesses — label_map can be empty when the
+    # tissue sits past the non-wrap depth grid (axial_wrap folds the B-scan only).
     cfg = SimConfig(anatomy="macula", lateral_fov_um=6000.0,
                     pixels_per_spectrum=512, lines_per_frame=120)
     assert cfg.shape_model == "normal"
-    res = simulate(cfg, seed=2)
-    lab = res.labels2d
-    prof = np.isin(lab, [1, 2, 3, 4, 5]).sum(axis=0)     # inner-retina pixel thickness
-    center = prof[lab.shape[1] // 2]
-    edge = np.median(prof[:30])
-    assert center < 0.75 * edge, (center, edge)          # foveal thinning present
+    from octsim.generate import build_scene
+    m = build_scene(cfg, np.random.default_rng(2))
+    x = np.linspace(0.0, 6000.0, 300)
+    cross = m.cross_section(0.0, x, 840.0)
+    inner = cross.opt_b[5] - cross.opt_b[0]              # NFL..OPL optical thickness
+    c = int(np.argmin(np.abs(x - m.center_x_um)))
+    assert inner[c] < 0.75 * np.median(inner[:30]), (inner[c], np.median(inner[:30]))
 
 
 def test_both_bundled_models_load():
@@ -112,6 +115,39 @@ def test_parametric_opt_out():
                     pixels_per_spectrum=512, lines_per_frame=96)
     res = simulate(cfg, seed=1)                          # must not raise; uses the pit formula
     assert res.bscan.shape[0] == 256
+
+
+def test_nfl_thickness_decreases_toward_fovea():
+    """NFL must taper with eccentricity — thicker at 1.5 mm than at 0.3 mm — not a
+    flat slab that only drops inside pit_radius. Covers default OCTA-500 shape model
+    and the parametric pit path."""
+    from octsim.generate import _resolve_shape_model
+
+    def _nfl_at(model, ecc_um):
+        x = np.linspace(0.0, 6000.0, 601)
+        cross = model.cross_section(0.0, x, 840.0)
+        t = cross.phys_b[1] - cross.phys_b[0]          # NFL = layer 0
+        r = np.abs(x - model.center_x_um)
+        idx = np.argsort(np.abs(r - ecc_um))[:5]
+        return float(np.mean(t[idx]))
+
+    sm = _resolve_shape_model("normal")                 # octa500
+    m = cal.retina_from_shape_model(sm, np.random.default_rng(11), lateral_fov_um=6000.0)
+    t15, t03 = _nfl_at(m, 1500.0), _nfl_at(m, 300.0)
+    assert t15 > t03 * 1.5, (t15, t03)
+    # also thicker at the perifovea than at mid-parafovea (not a plateau past 1 mm)
+    t25 = _nfl_at(m, 2500.0)
+    assert t25 > t15 * 1.05, (t25, t15)
+
+    from octsim.anatomy.retina import random_retina, macular_nfl_thickness
+    mp = random_retina(np.random.default_rng(0), location="macula", lateral_fov_um=6000.0)
+    assert mp.data_thickness is None
+    p15, p03 = _nfl_at(mp, 1500.0), _nfl_at(mp, 300.0)
+    assert p15 > p03 * 1.5, (p15, p03)
+    # unit curve itself: 1.5 mm > 0.3 mm
+    r = np.array([300.0, 1500.0])
+    curve = macular_nfl_thickness(r, base_um=34.0)
+    assert curve[1] > curve[0] * 1.5
 
 
 if __name__ == "__main__":

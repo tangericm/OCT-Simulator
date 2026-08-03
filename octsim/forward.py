@@ -55,7 +55,7 @@ def synthesize_bscan_spectra(
     (``n_depth == source.n_k // 2``). Optional per-column (length ``n_x``) arrays:
     ``motion_dz_um`` (bulk axial motion → k-dependent depth phase), ``washout_gain``
     (fringe-washout contrast loss), and ``column_phase`` (k-independent phase drift).
-    Returns the real detector spectra a swept source would digitise, one per A-scan.
+    Returns the real detector spectra swept source would digitise, one per A-scan.
     """
     r = np.asarray(reflectivity)
     if r.ndim == 1:

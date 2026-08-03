@@ -88,12 +88,13 @@ def test_gate_outcome_reports_waivers_without_counting_them_as_passes():
 
 
 def test_sag_gate_can_resolve_the_inter_device_difference():
-    """Real sag is 503 um on Maestro3 and 254 um on Maestro2.
+    """Tilt-free sag is ~311 um on Device A and ~257 um on Device B.
 
-    A tolerance wider than that 249 um gap cannot tell a correct render from one using the
+    A tolerance wider than that ~54 um gap cannot tell a correct render from one using the
     wrong device's scan-distortion correction, which is the single thing it exists to catch.
     """
-    assert rmet.GATES["sag_optical_um"] < 249.0 / 2
+    assert rmet.GATES["sag_optical_um"] < 54.0
+    assert rmet.GATES["sag_optical_um"] == 40.0
 
 
 def test_gate_coverage_is_more_than_a_quarter_of_the_vector():

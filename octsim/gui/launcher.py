@@ -60,7 +60,7 @@ SECTIONS = [
     ]),
     ("Dispersion / Fall-off", [
         ("Dispersion (0=sharp, ±=stretch)", "dispersion", "float", None),
-        ("Fall-off 6 dB depth (µm) [0=off]", "falloff_6db_um", "float", None),
+        ("Fall-off 6 dB depth (µm) [blank=instrument, 0=off]", "falloff_6db_um", "float", None),
     ]),
     ("Noise / Artifacts", [
         ("Noise-free", "noise_free", "bool", None),
@@ -245,7 +245,12 @@ class Launcher(QWidget):
             elif kind == "int":
                 data[attr] = int(round(float(w.text() or "0")))
             else:
-                data[attr] = float(w.text() or "0")
+                text = (w.text() or "").strip()
+                # None-sentinel fields: blank means "take from instrument / default"
+                if attr in ("falloff_6db_um", "scan_distortion_correction") and text == "":
+                    data[attr] = None
+                else:
+                    data[attr] = float(text or "0")
         return SimConfig(**data).normalized()
 
     def _apply_config(self, cfg: SimConfig) -> None:
@@ -257,7 +262,7 @@ class Launcher(QWidget):
             elif kind == "combo":
                 w.setCurrentText(str(val))
             else:
-                w.setText(f"{val:g}")
+                w.setText("" if val is None else f"{val:g}")
 
     # ---------------------------------------------------------------- settings persistence
     def _save_settings(self, *, explicit: bool = False) -> None:

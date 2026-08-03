@@ -54,7 +54,7 @@ jobs:
       - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
 
       # Called out as its own job because it is the only check that cannot be passed by
-      # fitting the 840 nm Maestro corpus: it asserts the known wavelength behaviour of
+      # fitting the 840 nm device corpus: it asserts the known wavelength behaviour of
       # the tissue model (choroidal penetration and deep-tail decay vs lambda).
       - name: Multi-wavelength assertions
         run: python tests/test_wavelength.py

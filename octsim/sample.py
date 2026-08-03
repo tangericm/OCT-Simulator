@@ -374,14 +374,14 @@ def build_reflectivity_from_boundaries(
     # Sub-resolution lateral speckle decorrelation.
     #
     # Real lateral speckle grain is finer than the optical spot: a 15 µm waist predicts
-    # ~12 µm and the Maestro corpora measure ~5 µm. The fix is NOT to shrink
+    # ~12 µm and the reference corpora measure ~5 µm. The fix is NOT to shrink
     # beam_waist_um — that would falsify the instrument's real lateral resolution for
     # actual structure (vessels, layer boundaries) in order to fix a statistic of the
     # noise. Instead a fraction of the speckle power is replaced by a separately
     # decorrelated realisation riding the same smooth brightness envelope, which leaves
     # the imaged resolution of deterministic structure untouched.
     #
-    # That decorrelation length is PHYSICAL, not per-A-line. Measured across seven Maestro
+    # That decorrelation length is PHYSICAL, not per-A-line. Measured across seven device
     # corpora spanning 2.93–23.44 µm of A-line pitch, one correlation length of ~5 µm
     # reproduces every one of them (RMS 1.4 µm, and ≤0.7 µm on the four line scans, which
     # are the corpora fine enough to resolve it at all). The apparent growth of the

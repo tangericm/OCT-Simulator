@@ -21,7 +21,7 @@ acquisition appearance, kept as a SEPARATE texture profile rather than pooled in
 single-frame healthy default (see ``unlabeled.bundled_texture``).
 
 The raw dataset is NOT redistributed here (~4.5 GB). Point ``root`` at an extracted tree with
-``OCT/``, ``GT_Layers/``, ``GT_FAZ/`` (``scripts/fit_octa500.py`` also reads the release zip).
+``OCT/``, ``GT_Layers/``, ``GT_FAZ/`` (the offline OCTA-500 fit also reads the release zip).
 Only the tiny fitted artifacts travel with the repo: ``texture_octa500.json`` and
 ``octa500_macula.json``.
 """
@@ -312,9 +312,28 @@ def thickness_stack(root, ids=None, *, n_ecc=201, half_width_um=2600.0, n_r=150)
             continue
         inner = np.interp(np.abs(ecc), rc, ri)             # flat-clamped beyond the last bin
         outer = np.interp(np.abs(ecc), rc, ro)
+        # Eccentricity-dependent RNFL share: fixed canonical ratios made every inner layer
+        # inherit the same pit→plateau shape, so RNFL was a flat slab outside ~1 mm. Real
+        # macular RNFL collapses under the FAZ and thickens through the perifovea; the
+        # residual inner compartment is split among GCIP/INL/OPL by their relative ratios.
+        from ..anatomy.retina import (NFL_MACULA_RISE_UM, NFL_MACULA_RISE_POW,
+                                      NFL_MACULA_PERI_START_UM, NFL_MACULA_PERI_GAIN)
+        rabs = np.abs(ecc)
+        rise = 1.0 - np.exp(-(rabs / NFL_MACULA_RISE_UM) ** NFL_MACULA_RISE_POW)
+        peri = 1.0 + NFL_MACULA_PERI_GAIN * np.maximum(
+            rabs - NFL_MACULA_PERI_START_UM, 0.0) / 1000.0
+        rnfl_share = np.clip(inner_r["RNFL"] * rise * peri, 0.0, 0.55)
+        other = {k: inner_r[k] for k in ("GCIP", "INL", "OPL")}
+        other_tot = sum(other.values()) or 1.0
+        rest = np.clip(1.0 - rnfl_share, 0.0, None)
         prof = np.zeros((len(SHAPE_LAYERS), n_ecc))
         for j, name in enumerate(SHAPE_LAYERS):
-            prof[j] = inner * inner_r[name] if name in inner_r else outer * outer_r[name]
+            if name == "RNFL":
+                prof[j] = inner * rnfl_share
+            elif name in other:
+                prof[j] = inner * rest * (other[name] / other_tot)
+            else:
+                prof[j] = outer * outer_r[name]
         stack.append(prof)
     return np.asarray(stack), ecc
 

@@ -40,7 +40,7 @@ class BloodVessel:
     y_half_extent_um: float = 1e9
     #: Whole-blood attenuation coefficient (1/µm, amplitude) at ~840 nm. Scattering-
     #: dominated. 0.016/µm = 16/mm sits in the published range for whole blood in the NIR
-    #: and reproduces the deepest shadows measured on the Maestro3 corpus (~-14 dB under a
+    #: and reproduces the deepest shadows measured on the Device A corpus (~-14 dB under a
     #: ~100 µm vessel: 20·log10(exp(-2·0.016·100)) = -13.9 dB).
     mu_blood_per_um: float = 0.016
     #: lumen reflectivity relative to the surrounding tissue — blood scatters MORE, not less
@@ -182,7 +182,7 @@ class ChoroidLumen:
     rx_um: float
     ry_um: float
     rz_um: float
-    gain: float = 0.25           # residual reflectivity inside the lumen
+    gain: float = 0.55           # residual reflectivity inside the lumen
 
 
 @dataclass
@@ -195,9 +195,14 @@ class ChoroidVasculature:
     choroid is sharp-edged, and it produced almost none of the deep dark lumina that
     dominate a real choroid's appearance.
 
-    Lumens are rasterised with a hard edge (a smoothstep one resolution cell wide), which
-    is the whole point — a Gaussian blob and a sharp-walled vessel have very different
-    intensity histograms even at identical variance.
+    Lumens are rasterised with a finite wall width (smoothstep over ``edge_um``). Overlapping
+    lumens take the darker gain (``minimum``), not the product — a voxel inside two vessels
+    is still one blood column, and multiplicative stacking invented −4 dB local dips that
+    real SD-OCT choroid does not show.
+
+    Optional ``stroma_field`` adds mild large-scale stroma mottle *under* the lumen min-
+    compose: lumen floors stay at absolute ``lu.gain`` (not stroma×gain), so structure-SD
+    rises without reopening ``choroid_dark_frac_4db``.
     """
 
     top_opt: np.ndarray          # [n_x] optical depth of the choroid top (per column)
@@ -207,7 +212,13 @@ class ChoroidVasculature:
     #: octsim.anatomy.retina.RETINA_LAYERS), which is where it belongs.
     cc_thickness_um: float = 0.0
     cc_gain: float = 1.0
-    edge_um: float = 6.0              # lumen wall softness
+    # Sharper than the dark-frac fix (12 µm): min-compose + gain≥0.56 keep −4 dB
+    # outliers inside gate, while walls stay crisp enough for visible striation.
+    edge_um: float = 7.0
+    stroma_field: object = None          # optional CoherentField for stroma mottle
+    #: Blend of ``stroma_field`` toward unity (1 = full field contrast). Default off —
+    #: mild mottle is optional; vessel lumens carry striation. Keep ≤0.35 if enabled.
+    stroma_mix: float = 0.0
 
     def apply(self, r: np.ndarray, ctx) -> None:
         depth = ctx.depth_axis_um
@@ -227,8 +238,12 @@ class ChoroidVasculature:
 
         sub = slice(r0, r1)
         thick = np.maximum(bot - top, 1e-6)
-        z_rel = (d[sub] - top) / thick                      # 0 at BM, 1 at the sclera
-        gain = np.ones((r1 - r0, n_x))
+        if self.stroma_field is not None and self.stroma_mix > 0.0:
+            raw = np.asarray(self.stroma_field.sample(depth[r0:r1], x, ctx.y_um), float)
+            mix = float(np.clip(self.stroma_mix, 0.0, 1.0))
+            gain = 1.0 + mix * (raw - 1.0)
+        else:
+            gain = np.ones((r1 - r0, n_x))
 
         # choriocapillaris: a thin bright band hugging Bruch's membrane
         cc = (d[sub] - top) < self.cc_thickness_um
@@ -261,10 +276,14 @@ class ChoroidVasculature:
             # normalised radius; distance is measured in µm so the edge width is physical
             rr = np.sqrt(((x[None, :] - lu.x0_um) / rx) ** 2
                          + ((d[sub] - zc) / rz) ** 2)
-            # hard-edged: smoothstep across one wall width, not a Gaussian falloff
+            # finite wall: smoothstep across edge_um, not a Gaussian falloff
             t = np.clip((rr - 1.0) * (min(rx, rz) / e) + 1.0, 0.0, 1.0)
             wall = t * t * (3.0 - 2.0 * t)                   # 0 inside, 1 outside
-            gain *= lu.gain + (1.0 - lu.gain) * wall
+            # Blend toward absolute lumen floor; outside (wall=1) keeps stroma. Using
+            # ``lu.gain + (1-lu.gain)*wall`` would min-clip bright stroma back to 1.
+            factor = lu.gain + (gain - lu.gain) * wall
+            # darker vessel wins — do not compound overlapping voids
+            gain = np.minimum(gain, factor)
 
         # r[sub] is a basic slice (a view), so the masked in-place multiply writes through
         r[sub][band[sub]] *= gain[band[sub]]

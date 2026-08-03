@@ -156,8 +156,8 @@ def _resolve_shape_model(name: str):
 #: bit-identical at a fixed seed.
 _BUNDLED_PROFILE = {
     "literature": None, "parametric": None, "none": None, "": None,
-    "maestro3": "retina_optics_maestro3.json",
-    "maestro2": "retina_optics_maestro2.json",
+    "device_a": "retina_optics_device_a.json",
+    "device_b": "retina_optics_device_b.json",
     "octa500": "retina_optics_octa500.json",
 }
 

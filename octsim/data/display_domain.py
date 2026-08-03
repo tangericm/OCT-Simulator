@@ -1,6 +1,6 @@
 """Load public, already-displayed OCT corpora (BMP / JPEG) for cross-device validation.
 
-The Maestro ``.raw`` path (:mod:`octsim.data.real_maestro`) reconstructs from the detector
+The device ``.raw`` path (:mod:`octsim.data.real_device`) reconstructs from the detector
 spectra, so its output is in a **linear** domain with a genuine noise floor and octsim's
 own dB mapping. Public datasets are not: OCTA-500, OCTID, OCTDL and Kermany ship 8-bit
 images that have already been through the device's tone curve (OCTA-500's vitreous sits at
@@ -15,7 +15,7 @@ the validation harness drops the rest rather than reporting numbers it cannot su
 
 So these corpora answer "does the simulated *anatomy* generalise across devices?" and
 deliberately do not answer "does the simulated *photometry* generalise?" — for that, the
-only linear-domain data available is the Maestro raw.
+only linear-domain data available is the device raw.
 """
 
 from __future__ import annotations
@@ -93,9 +93,9 @@ def noise_level_for_snr(snr_db: float, ref_db: float = REFERENCE_SNR_DB) -> floa
     """Scale the noise coefficients to a corpus's own measured SNR.
 
     SNR is an acquisition property (gain, reference power, integration time), not a tissue
-    property. Maestro2 measures 45.3 dB against Maestro3's 52.0 — and that 6.7 dB gap is
+    property. Device B measures 45.3 dB against Device A's 52.0 — and that 6.7 dB gap is
     almost exactly the inner-retina-to-vitreous contrast gap seen when scoring the
-    Maestro3-tuned simulator against Maestro2. Supplying each corpus's own SNR is therefore
+    Device A-tuned simulator against Device B. Supplying each corpus's own SNR is therefore
     a device calibration, not a fudge: without it the harness reports a tissue-model failure
     for what is purely an exposure difference.
 
@@ -134,18 +134,34 @@ def calibrate_axial_pitch(images, dz_guess: float, dx: float,
     return float(target_um * rmet.TISSUE_N / med_rows)
 
 
+def _corpus_dir(key: str) -> str:
+    """Local folder name for a raw corpus under ``$OCT_DATA_ROOT``.
+
+    The public tree carries no vendor directory names, so the default is the generic
+    device key. Point ``OCT_CORPUS_<KEY>`` at whatever the local scan tree actually
+    calls the folder (e.g. ``OCT_CORPUS_DEVICE_A=SomeDevice3``).
+    """
+    return os.environ.get(f"OCT_CORPUS_{key.upper()}", key)
+
+
 HOLDOUT_CORPORA = {
     # Same vendor, different unit / gain / operator, and crucially still LINEAR domain:
     # the strongest generalisation test available.
     # ``instrument`` is the single source for this corpus's device numbers: its
-    # scan-distortion correction (0.43) and measured SNR (45.33 dB) live in
-    # octsim/data/instrument_maestro2.json and reach the renderer through
-    # SimConfig(instrument="maestro2"). The corpora below have no instrument model, so they
+    # scan-distortion correction (0.67) and measured SNR (45.33 dB) live in
+    # octsim/data/instrument_device_b.json and reach the renderer through
+    # SimConfig(instrument="device_b"). The corpora below have no instrument model, so they
     # still carry a ``distortion`` here as a fallback.
-    "maestro2": dict(kind="raw", tier="full", dz=3.87, dz_known=True, fov_um=6000.0,
-                     fov_known=True, instrument="maestro2",
-                     path=os.path.join("Maestro2",
+    "device_b": dict(kind="raw", tier="full", dz=3.87, dz_known=True, fov_um=6000.0,
+                     fov_known=True, instrument="device_b",
+                     path=os.path.join(_corpus_dir("device_b"),
                                        "Line_6mm_2048Aline_135degCW_50frame_gain165")),
+    # Within-device never-fit holdout: same Device A unit, a second hydrated line-scan folder.
+    # Fit / training stays on 6mm_1024Aline; this corpus JUDGES generalization inside the
+    # device so single-folder overfitting is detectable (plan A4).
+    "device_a_line2": dict(kind="raw", tier="full", dz=3.87, dz_known=True, fov_um=6000.0,
+                           fov_known=True, instrument="device_a",
+                           path=os.path.join(_corpus_dir("device_a"), "6mm_1024Aline_2")),
     # Cross-vendor (Optovue), display domain: geometry and spatial statistics only.
     "octa500": dict(kind="octa500", tier="display", dz=3.125, dz_known=False, fov_um=3000.0,
                     fov_known=True, distortion=0.28,
@@ -168,8 +184,8 @@ def load_holdout(name: str, data_root: str, *, limit: int = 6, stride: int = 8):
     full = os.path.join(data_root, spec["path"])
     kind = spec["kind"]
     if kind == "raw":
-        from . import real_maestro
-        imgs, alines, _skipped = real_maestro.load_corpus(full, limit=limit, stride=stride)
+        from . import real_device
+        imgs, alines, _skipped = real_device.load_corpus(full, limit=limit, stride=stride)
         spec["dx"] = spec["fov_um"] / alines
         return imgs, spec
     if kind == "octa500":

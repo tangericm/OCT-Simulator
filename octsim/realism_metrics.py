@@ -7,7 +7,7 @@ of tissue signal is pushed into the noise floor, because the floor dominates the
 count either way. This module supplies the statistics that *are* sensitive to it.
 
 Everything here operates on a **dB B-scan in octsim's display domain** (``volume_db``
-for simulated frames, :func:`octsim.data.real_maestro.recon_frame` for real ones), so
+for simulated frames, :func:`octsim.data.real_device.recon_frame` for real ones), so
 real and simulated images are measured by literally the same code path.
 
 The measurement protocol is:
@@ -58,7 +58,7 @@ CHOROID_BAND = (60.0, 360.0)
 #: group index used to convert optical µm to tissue µm for reporting
 TISSUE_N = 1.38
 
-#: Axial resolution cell (optical µm) — the Maestro3 mirror-measured PSF FWHM. The
+#: Axial resolution cell (optical µm) — the Device A mirror-measured PSF FWHM. The
 #: lamination gradient is reported per resolution cell rather than per pixel so it stays
 #: comparable between corpora sampled at different depth pitches.
 AXIAL_CELL_UM = 15.5
@@ -129,7 +129,7 @@ def _gaussian_filter(a: np.ndarray, sigma):
         raise RuntimeError("realism_metrics requires SciPy for the choroid statistics")
 
 
-#: rows above this optical depth are excluded from landmark detection. Both real Maestro
+#: rows above this optical depth are excluded from landmark detection. Both real device
 #: frames and octsim output carry a bright DC / zero-delay band at the top of the frame
 #: (real: residual reference power; sim: the 128-tap box high-pass at reconstruct.py:59).
 #: With some optics profiles that band is BRIGHTER than the RPE, so a naive per-column
@@ -175,7 +175,7 @@ def find_rpe(db: np.ndarray, dz_um: float = 1.0, skip_um: float = DC_SKIP_UM) ->
     # as -260 px, which corrupts the RPE curve, the flattening, and every geometry metric
     # derived from them. Measured on a synthetic 500-row frame at 2 µm/px with 250 µm of
     # sag: 375 px of error (≈ the full searchable depth) before this clamp, 12 px after.
-    # Deep frames are unaffected — Maestro-like geometry never reaches the bound.
+    # Deep frames are unaffected — device-like geometry never reaches the bound.
     max_shift = min(int(round(700.0 / dz_um)), max((n - 1) // 2, 1))
     prof = sm.mean(axis=1)
     shifts = np.zeros(n_x)
@@ -205,6 +205,21 @@ def find_rpe(db: np.ndarray, dz_um: float = 1.0, skip_um: float = DC_SKIP_UM) ->
     cand = np.nonzero(is_max & (amp > thr))[0]
     anchor = float(cand[-1]) if cand.size else float(np.argmax(prof))
     return shifts + anchor + skip
+
+
+def _tilt_free_sag_um(rpe_rows: np.ndarray, dz_um: float) -> float:
+    """Edge-to-centre RPE bowl depth after removing linear scan tilt, µm.
+
+    Fits a parabola on FOV-normalised lateral coordinate x∈[-1, 1]. For
+    ``rows ≈ a2 x² + a1 x + a0`` the tilt-free edge-to-centre sag is ``|a2|·dz``.
+    """
+    rows = np.asarray(rpe_rows, float)
+    n = int(rows.size)
+    if n < 8 or not np.isfinite(dz_um) or dz_um <= 0:
+        return 0.0
+    x = np.linspace(-1.0, 1.0, n)
+    a2 = float(np.polyfit(x, rows, 2)[0])
+    return float(abs(a2) * dz_um)
 
 
 def flatten_to_rpe(db: np.ndarray, ref_row: int | None = None,
@@ -298,7 +313,7 @@ def find_ilm(flat: np.ndarray, ref_row: int, dz_um: float,
     """First sustained rise above the vitreous floor, searching down from ``skip_um``.
 
     ``skip_um`` skips the DC / zero-delay band at the top of the frame, which is bright
-    in real Maestro data (and in sim output, from the box high-pass in
+    in real device data (and in sim output, from the box high-pass in
     :mod:`octsim.reconstruct`) and would otherwise be mistaken for the ILM.
     """
     skip = max(int(round(skip_um / dz_um)), 1)
@@ -355,7 +370,7 @@ class RealismMetrics:
     rpe_row: int = 0
     noise_floor_db: float = 0.0
     thickness_tissue_um: float = 0.0        # ILM -> RPE peak, median across columns
-    sag_optical_um: float = 0.0             # RPE-band peak-to-peak across the FOV
+    sag_optical_um: float = 0.0             # tilt-free RPE bowl depth (µm, see measure)
 
     # band medians
     band_db: dict = field(default_factory=dict)
@@ -474,9 +489,12 @@ def measure(db: np.ndarray, dz_um: float, dx_um: float) -> RealismMetrics:
         m.median_tissue_snr_db = float(np.median(tis) - floor_db_abs)
 
     # --- geometry
-    # p2-p98 rather than min-max: a handful of columns where the anchor jumps a band (under
-    # a vessel shadow, or at the FOV edge) would otherwise dominate a peak-to-peak sag.
-    m.sag_optical_um = float((np.percentile(rpe_rows, 98) - np.percentile(rpe_rows, 2)) * dz_um)
+    # Tilt-free quadratic bowl depth. Peak-to-peak (p2-p98) conflates the posterior-pole
+    # smile with scan tilt and edge-tracking noise: on Device A line scans the p2p sag is
+    # ~500-600 µm while the tilt-removed bowl is only ~310 µm, so a clean sim bowl that
+    # matched p2p looked ~2× too curved. Fit rows ≈ a2 x² + a1 x + a0 on x∈[-1,1] (FOV
+    # half-width normalised); edge-to-centre sag of that parabola is |a2|·dz.
+    m.sag_optical_um = _tilt_free_sag_um(rpe_rows, dz_um)
     m.thickness_tissue_um = float(np.median(rpe_rows - ilm_rows) * dz_um / TISSUE_N)
 
     # --- speckle, inner retina, margins trimmed so band edges don't bias the ACF
@@ -610,6 +628,37 @@ def aggregate(runs: list[RealismMetrics]) -> dict:
     return out
 
 
+#: Metrics that may enter a FIT objective. Everything else is JUDGE-only so a single-device
+#: fit cannot silently overfit the score it is graded on (plan A4).
+FIT_METRICS = frozenset({
+    "contrast_inner_vitreous",
+    "contrast_rpe_onl",
+    "frac_tissue_in_floor",
+    "speckle_grain_lateral_um",
+    "speckle_grain_axial_um",
+    "sag_optical_um",
+    "inner_swing_db",
+    "inner_gradient_db",
+    "median_tissue_snr_db",
+    "band_above_floor_db.onl",
+    "column_energy_sd_db",
+})
+
+#: Reserved for within-device / never-fit JUDGE. Reported and gated, but must not be
+#: minimised by ``calibrate.distance`` / DE. Histogram shape and axial gradient spectrum
+#: are the canonical reserved pair; choroid dark-frac is structural (not a θ lever).
+JUDGE_ONLY_METRICS = frozenset({
+    "choroid_dark_frac_4db",
+    "choroid_dark_frac_8db",
+    "choroid_structure_sd_db",
+    "shadow_count",
+    "inner_extrema",
+    "rpe_peak_separation_um",
+    "ilm_row",
+    "rpe_row",
+})
+
+
 #: metrics where the sim must match real, with the acceptance tolerance from the plan.
 #: ``None`` tolerance means "report the delta, do not gate on it".
 GATES = {
@@ -619,7 +668,6 @@ GATES = {
     "choroid_structure_sd_db": 2.6,     # real ~8.6, allow >= 6.0
     "choroid_dark_frac_8db": 0.036,     # real ~0.066, allow >= 0.03
     "speckle_grain_lateral_um": 3.0,
-    "sag_optical_um": 150.0,
     # Guards against a fit flattening the inner retina into a featureless slab while every
     # band median still matches. Measured per column (see `measure`), not on the mean
     # A-line, which smears real lamination away.
@@ -633,11 +681,10 @@ GATES = {
     # delta — a gate fitted to today's error only records today's error. Where a gate is
     # known to fail, it is listed in EXPECTED_FAIL rather than widened until it passes.
     #
-    # Sag was 150 µm, which was wider than the entire effect it had to resolve: real sag is
-    # 503 µm on Maestro3, 254 µm on Maestro2 and 41 µm on OCTA-500, so a device rendered
-    # with the wrong scan-distortion correction sailed through. 60 µm passes all three
-    # corpora (+7, +21, +14) and catches a device mix-up, which is ~250 µm.
-    "sag_optical_um": 60.0,
+    # Tilt-free bowl (not p2p): real ~311 µm on Device A and ~257 µm on Device B, so the
+    # inter-device gap is only ~54 µm. 40 µm still passes both corpora and catches a
+    # Device A/Device B distortion mix-up (~55 µm).
+    "sag_optical_um": 40.0,
     # Real 5.24 ± 0.12 / 4.87 ± 0.06 — the most stable statistic in the vector, and the
     # axial partner of the lateral grain gate, which had no counterpart until now.
     "speckle_grain_axial_um": 1.0,
@@ -662,18 +709,14 @@ GATES = {
 #: is reported as ``XFAIL`` and does not fail the run; if it starts passing it is reported as
 #: ``XPASS``, which is a prompt to delete the entry rather than a failure.
 EXPECTED_FAIL = {
-    ("training", "choroid_dark_frac_4db"):
-        "sim choroid holds ~7x too many locally-dark voxels (real 0.004, sim 0.030): the "
-        "lumens are rounder and more separated than the real vertical striation. Needs the "
-        "choroidal vasculature model, not a tolerance change.",
     ("octa500", "inner_extrema"):
         "sim inner retina resolves 2.4 extrema against a real 4.9 in the display domain, "
-        "while matching 3.0 vs 3.0 on Maestro2. Under-lamination that only the tone-curved "
+        "while matching 3.0 vs 3.0 on Device B. Under-lamination that only the tone-curved "
         "corpus is sensitive to; a joint (mu, backscatter) fit (R1) is the fix.",
     ("octa500", "speckle_grain_axial_um"):
         "real 3.13 um vs sim 5.40, while the two raw-domain corpora agree to 0.2 um. Axial "
         "grain is set by the source bandwidth, and OCTA-500 has no instrument model, so it "
-        "is rendered with Maestro3's source — this compares two devices' axial PSFs. Its "
+        "is rendered with Device A's source — this compares two devices' axial PSFs. Its "
         "axial pitch is also solved rather than measured, so the um scale is itself "
         "derived. Fix by giving the corpus an instrument model, not by widening the gate; "
         "until then this says nothing about the tissue model.",

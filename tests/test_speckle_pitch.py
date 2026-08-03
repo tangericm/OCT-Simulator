@@ -4,7 +4,7 @@ This is the same genre of check as ``test_wavelength.py``: it asserts a property
 must have for a reason outside the corpus it was fitted to, so it cannot be satisfied by
 tuning against one device.
 
-Measured across seven Maestro corpora spanning 2.93-23.44 um of A-line pitch, the real
+Measured across seven device corpora spanning 2.93-23.44 um of A-line pitch, the real
 lateral speckle grain is one physical length of ~5 um. The apparent growth at coarse pitch
 is ``realism_metrics._acf_fwhm`` bottoming out at its 0.5 px floor, not a wider grain:
 

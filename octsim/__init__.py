@@ -36,6 +36,7 @@ from .calibration import (
 from .config import ResolvedConfig, SimConfig, config_from_mapping
 from .data import unlabeled
 from .data.unlabeled import TextureProfile, bundled_texture, extract_texture
+from . import spectral_metrics, spectral_mle
 from .shape_model import LayerShapeModel
 from .forward import synthesize_ascan_spectrum, synthesize_bscan_spectra
 from .generate import SampleResult, generate_dataset, simulate
@@ -81,6 +82,8 @@ __all__ = [
     "TextureProfile",
     "extract_texture",
     "bundled_texture",
+    "spectral_metrics",
+    "spectral_mle",
 ]
 
 __version__ = "0.2.0"

@@ -2,7 +2,7 @@
 
 Everything in a :class:`CalibrationProfile` is *fit*; everything here is **measured** from
 the device's own calibration files and then frozen, so a tissue-optics fit can never absorb
-an instrument error. The measurements come from a Topcon Maestro scan folder:
+an instrument error. The measurements come from a commercial SD-OCT scan folder:
 
 * ``*.CLB``   — the k-linearisation LUT (first 2048 float32 ∈ [0,1]); confirms 2048 pixels
   and gives the depth calibration used to set ``k_span_factor``.
@@ -13,11 +13,11 @@ an instrument error. The measurements come from a Topcon Maestro scan folder:
   ``background`` for :func:`~octsim.reconstruct.reconstruct_bscan` than FPN alone.
 * mirror scans — a point reflector vs depth → the sensitivity **roll-off** ``falloff_6db_um``
   and the **axial PSF FWHM**.
-* ``MainInfo.bin`` — device header (3D OCT-1 Maestro, ~840 nm SD-OCT ⇒ ``center_wavelength_nm≈840``).
+* ``MainInfo.bin`` — device header (a commercial 840 nm SD-OCT, ~840 nm SD-OCT ⇒ ``center_wavelength_nm≈840``).
 
-:func:`load_instrument` reads a bundled/þath JSON produced by ``scripts/build_instrument.py``.
+:func:`load_instrument` reads a bundled/path JSON produced by an offline instrument calibration.
 :meth:`Instrument.as_source` builds the concrete :class:`~octsim.source.LightSource` whose
-``power_spectrum`` is the measured envelope. Wiring: ``SimConfig.instrument="maestro3"`` →
+``power_spectrum`` is the measured envelope. Wiring: ``SimConfig.instrument="device_a"`` →
 :meth:`SimConfig.resolve` overlays it; ``""`` (default) keeps the closed-form Gaussian source.
 """
 
@@ -34,8 +34,8 @@ from .source import LightSource
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 #: Measured image SNR (dB) of the corpus the noise coefficients in :class:`SimConfig` were
-#: calibrated against — Maestro3 6 mm/1024, from
-#: ``octsim/data/texture_maestro3_macula_meta.json``. A device with its own measured
+#: calibrated against — Device A 6 mm/1024, from
+#: ``octsim/data/texture_device_a_macula_meta.json``. A device with its own measured
 #: ``snr_db`` is scaled relative to this; see :attr:`Instrument.noise_scale`.
 #: Full precision on purpose: it makes ``noise_scale`` exactly 1.0 for the calibration
 #: device, so overlaying an instrument cannot nudge the corpus it was calibrated on.
@@ -43,8 +43,8 @@ REFERENCE_SNR_DB = 52.04221179196247
 
 #: bundled instrument keywords → JSON filename (raw calibration files are never committed).
 _BUNDLED_INSTRUMENT = {
-    "maestro3": "instrument_maestro3.json",
-    "maestro2": "instrument_maestro2.json",
+    "device_a": "instrument_device_a.json",
+    "device_b": "instrument_device_b.json",
 }
 
 
@@ -53,7 +53,7 @@ class Instrument:
     """A frozen, measured device model (Tier 1). JSON-serialisable; arrays inline as lists."""
 
     name: str
-    center_wavelength_nm: float = 840.0     # 3D OCT-1 Maestro SD-OCT source
+    center_wavelength_nm: float = 840.0     # a commercial 840 nm SD-OCT SD-OCT source
     n_k: int = 2048
     bandwidth_fwhm_nm: float = 45.0         # Gaussian-fit width of the measured envelope
     k_span_factor: float = 1.5              # set so the depth pixel matches the CLB calibration
@@ -64,11 +64,11 @@ class Instrument:
     floor_db: float = -60.0                # display/noise floor seed
     falloff_6db_um: float = 0.0            # sensitivity roll-off (0 = none measured)
     axial_fwhm_um: float = 0.0            # measured axial PSF FWHM (diagnostic)
-    #: Fraction of the geometric sag surviving the vendor's scan-distortion correction.
-    #: A DEVICE property: measured against a nominal 6 mm B-scan (raw geometric sag
-    #: ~585 µm), Maestro3 flattens to 504 µm -> 0.86 and Maestro2 to 249 µm -> 0.43. Two
-    #: units of the same product line differ by more than 2x, so it cannot be a constant.
-    #: ``None`` = not measured for this device; the SimConfig default applies.
+    #: Fraction of the anatomic bowl surviving the vendor's scan-distortion correction.
+    #: A DEVICE property: measured against tilt-free quadratic sag on a nominal 6 mm
+    #: B-scan (raw anatomic sag at R=12 mm ≈ 381 µm), Device A ~311 µm -> 0.82 and
+    #: Device B ~257 µm -> 0.67. Earlier 0.86/0.43 tracked peak-to-peak sag (tilt-
+    #: inflated on Device A). ``None`` = not measured; the SimConfig default applies.
     scan_distortion_correction: float | None = None
     #: Measured image SNR of this device's corpus, dB. Scales the noise coefficients
     #: relative to :data:`REFERENCE_SNR_DB`, the corpus they were calibrated against.
@@ -106,7 +106,7 @@ class Instrument:
 
         SNR is an acquisition property — gain, reference power, integration time — not a
         tissue one, so a quieter or noisier unit must not be absorbed into the layer table.
-        Supplying each device's own measured SNR is what took held-out Maestro2 from 4/7 to
+        Supplying each device's own measured SNR is what took held-out Device B from 4/7 to
         9/9 in round 2 with zero tissue refitting.
         """
         if not self.snr_db:
@@ -149,7 +149,7 @@ class Instrument:
 
 
 def load_instrument(name: str) -> Instrument:
-    """Resolve an instrument keyword ("maestro3") or JSON path to an :class:`Instrument`."""
+    """Resolve an instrument keyword ("device_a") or JSON path to an :class:`Instrument`."""
     key = (name or "").lower()
     fn = _BUNDLED_INSTRUMENT.get(key)
     path = os.path.join(_DATA_DIR, fn) if fn else name

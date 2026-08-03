@@ -66,10 +66,34 @@ FAZ_RADIUS_UM = 320.0
 #: above zero so the map is still band-limited relative to the depth pixel.
 OUTER_SHARPNESS_UM = 1.5
 
-#: Optic-cup excavation depth range (optical µm). Measured on the Maestro3 disc scans
+#: Optic-cup excavation depth range (optical µm). Measured on the Device A disc scans
 #: against the peripapillary rim: ~720 µm at both 6 and 9 mm. Shared by every RetinaModel
 #: builder so the three constructors cannot drift apart again.
 ONH_CUP_DEPTH_RANGE = (560.0, 900.0)
+
+#: BMO half-width draw (µm). Vertical BMO diameter on healthy discs is ~1.4–1.8 mm.
+ONH_RADIUS_RANGE_UM = (700.0, 900.0)
+
+#: |disc − FOV centre| on real Device A 6 mm disc line/volume frames (median ≈ 1.1 mm;
+#: essentially never <200 µm). Macula stays near-centred.
+ONH_LATERAL_OFFSET_RANGE_UM = (500.0, 1500.0)
+MACULA_LATERAL_JITTER_UM = 80.0
+
+
+def sample_center_x_um(rng: np.random.Generator, *, location: str,
+                      lateral_fov_um: float, lateral_offset_um: float = 0.0,
+                      onh_radius_um: float = 750.0) -> float:
+    """Enface x of the scene centre (fovea for macula, disc for ``location='onh'``)."""
+    mid = 0.5 * float(lateral_fov_um) + float(lateral_offset_um)
+    if location == "onh":
+        # Keep the full BMO inside the FOV with a small peri-disc margin.
+        max_off = max(200.0, 0.5 * float(lateral_fov_um) - float(onh_radius_um) - 200.0)
+        lo, hi = ONH_LATERAL_OFFSET_RANGE_UM
+        hi = min(float(hi), float(max_off))
+        lo = min(float(lo), hi)
+        mag = float(rng.uniform(lo, hi)) if hi > 0.0 else 0.0
+        return mid + float(rng.choice([-1.0, 1.0])) * mag
+    return mid + float(rng.uniform(-MACULA_LATERAL_JITTER_UM, MACULA_LATERAL_JITTER_UM))
 
 #: Peripapillary RNFL thickening. Ganglion-cell axons converge on the canal, so the nerve
 #: fibre layer thins toward the fovea and thickens toward the disc — gradually, over
@@ -94,14 +118,62 @@ def nfl_disc_gradient(x, y_um, disc_x, disc_y_um, bmo_um):
     return 1.0 + NFL_DISC_GAIN * np.exp(-reach / NFL_DISC_DECAY_UM)
 
 
-#: Choroidal sublayer geometry, as a fraction of choroid thickness (Bruch's -> sclera), with
-#: lumen calibre ranges in µm. Sattler's layer holds medium vessels, Haller's the large ones;
-#: the choriocapillaris is too fine to resolve laterally and is rendered as a bright band
-#: rather than as lumens. See Pichi et al., Indian J Ophthalmol 2018;66(12):1716-26.
+#: Macular NFL radial profile. OCTA-500 subdivides ILM→OPL by fixed canonical ratios,
+#: so every inner layer inherits the same pit→plateau shape and RNFL is a flat ~35 µm
+#: slab from ~1 mm to the FOV edge. The parametric pit formula has the same failure
+#: mode (smootherstep reaches 1 at ``pit_radius`` ≈ 700 µm). Real macular RNFL is
+#: near-absent under the FAZ and thickens progressively through the parafovea /
+#: perifovea (cf. JHU hc RNFL vs eccentricity).
+NFL_MACULA_RISE_UM = 720.0        # scale of the foveal collapse (half-rise ~0.55 mm)
+NFL_MACULA_RISE_POW = 2.15
+NFL_MACULA_PERI_START_UM = 1200.0
+NFL_MACULA_PERI_GAIN = 0.30       # fractional thicken per mm beyond peri start
+NFL_MACULA_FLOOR_UM = 0.4         # µm; nonzero for numerical stability
+
+
+def macular_nfl_thickness(r_um, base_um: float = 34.0):
+    """NFL thickness (µm) vs radial eccentricity from the fovea.
+
+    ``base_um`` is the parafoveal reference (~1.2–1.5 mm). Near-zero at the fovea,
+    smooth rise through the parafovea, then continued thickening into the
+    perifovea — not a cliff at ``pit_radius``.
+    """
+    r = np.abs(np.asarray(r_um, float))
+    rise = 1.0 - np.exp(-(r / NFL_MACULA_RISE_UM) ** NFL_MACULA_RISE_POW)
+    peri = 1.0 + NFL_MACULA_PERI_GAIN * np.maximum(
+        r - NFL_MACULA_PERI_START_UM, 0.0) / 1000.0
+    return np.maximum(float(base_um) * rise * peri, NFL_MACULA_FLOOR_UM)
+
+
+def macular_gcl_radial_gain(r_um):
+    """Soft parafoveal peak for GCL (~1 at 0.9 mm, ~0.78 by 2.5 mm)."""
+    r = np.abs(np.asarray(r_um, float))
+    peak = np.exp(-0.5 * ((r - 900.0) / 750.0) ** 2)
+    return 0.78 + 0.22 * peak
+
+
+def _nfl_parafoveal_base(thickness_um, r_um, fallback: float = 30.0) -> float:
+    """Median NFL thickness in the 1.0–1.8 mm annulus, used as ``base_um``."""
+    r = np.asarray(r_um, float)
+    t = np.asarray(thickness_um, float)
+    m = (r >= 1000.0) & (r <= 1800.0)
+    if np.count_nonzero(m) >= 3:
+        return float(np.median(t[m]))
+    return float(fallback)
+
+
+#: Choroidal sublayer geometry, as a fraction of choroid thickness (Bruch's -> sclera).
+#: rz (depth) ≥ rx (lateral) so B-scan cross-sections read as vertical striation rather
+#: than round lumens (plan C). Sattler = medium, Haller = large;
+#: choriocapillaris is too fine to resolve and is a bright band, not lumens.
+#: Calibres stay ≥~10 µm laterally so vessel contrast survives the structure-SD
+#: metric's 3 px Gaussian smooth; density + tall rz keep packed vertical striation.
+#: Lumen gain stays moderately hypo so ``choroid_dark_frac_4db`` matches real
+#: SD-OCT (~0.004–0.008).
 CHOROID_SUBLAYERS = (
     # (name,     z_rel range,   rx µm,        rz µm,       per-mm density)
-    ("sattler",  (0.12, 0.48), (12.0, 36.0),  (12.0, 30.0), 17.0),
-    ("haller",   (0.45, 0.95), (36.0, 105.0), (34.0, 85.0), 6.5),
+    ("sattler",  (0.12, 0.48), (9.0, 20.0),   (30.0, 80.0), 16.0),
+    ("haller",   (0.45, 0.95), (18.0, 45.0),  (70.0, 180.0), 6.0),
 )
 
 
@@ -125,15 +197,24 @@ def random_choroid_lumens(rng, *, lateral_fov_um: float, y_span_um: float = 1400
         n = int(round(per_mm * span_mm * (1.0 + 2.0 * y_span_um / 1000.0)))
         for _ in range(max(n, 0)):
             rx = float(rng.uniform(rx0, rx1))
+            rz = float(rng.uniform(rz0, rz1))
+            # Prefer depth-elongated ellipsoids (vertical striation in B-scans). A minority
+            # stay more isotropic so the bed is not a pure picket fence.
+            if rng.random() < 0.90:
+                rz = max(rz, rx * float(rng.uniform(2.5, 4.5)))
             lumens.append(ChoroidLumen(
                 x0_um=float(rng.uniform(-0.05, 1.05)) * lateral_fov_um,
                 y0_um=float(rng.uniform(-y_span_um, y_span_um)),
                 z_rel=float(rng.uniform(z0, z1)),
                 rx_um=rx,
-                # vessels run mostly in-plane, so they are far longer than they are wide
+                # vessels run mostly in-plane along y, so they are far longer than wide
                 ry_um=rx * float(rng.uniform(3.0, 12.0)),
-                rz_um=float(rng.uniform(rz0, rz1)),
-                gain=float(rng.uniform(0.22, 0.52))))
+                rz_um=rz,
+                # Moderately hypo: SD-OCT choroidal blood is not near-black. Gains below
+                # ~0.4 punch past the −4 dB local-dark gate used by choroid_dark_frac_4db.
+                # Wider vessels (above) carry contrast through the structure-SD smooth;
+                # floors ≥0.56 leave ~0.002 dark_frac margin on the validate seed set.
+                gain=float(rng.uniform(0.56, 0.74))))
     return lumens
 
 
@@ -170,7 +251,7 @@ def random_macular_vessels(rng, *, center_x_um: float, lateral_fov_um: float,
 # Contrast widened and the outer complex brightened to match clinical B-scans.
 RETINA_LAYERS: list[RetinaLayer] = [
     # Backscatter set by matching the ILM-to-choroid mean A-line profile against the
-    # Maestro3 corpus (6 frames, scripts/validate_realism.py), band by band, with every
+    # Device A corpus (6 frames, scripts/validate_realism.py), band by band, with every
     # value expressed relative to the outer-complex peak. Two things the previous table got
     # badly wrong, both visible as "the layers look like stripes":
     #   * the NFL was ~22 dB too bright relative to the outer complex — bright enough that
@@ -187,7 +268,7 @@ RETINA_LAYERS: list[RetinaLayer] = [
     RetinaLayer("ONL", 78.0, 1.38, 7.2e-3, 1.2, "onl"),
     RetinaLayer("ELM", 5.0, 1.38, 3.5e-2, 3.0, "photoreceptor",
                 interface_reflectivity=0.012),
-    # Outer-complex levels measured on the Maestro3 corpus (octsim/data/... 6mm_1024Aline*)
+    # Outer-complex levels measured on the Device A corpus (octsim/data/... 6mm_1024Aline*)
     # from the RPE-flattened mean A-line over a window wide enough to contain the whole
     # complex: the RPE/BM maximum sits ~3 dB ABOVE the EZ maximum, with a ~9 dB trough
     # between them and ~35 um of optical separation. (An earlier pass here used a narrow
@@ -307,7 +388,10 @@ class RetinaModel:
     onl_bulge: float = 0.55
     # optic nerve head
     onh_radius_um: float = 850.0          # Bruch's-membrane-opening half-width (~0.85 mm)
-    onh_cup_depth_um: float = 700.0   # optical um; real Maestro3 discs measure ~720
+    onh_cup_depth_um: float = 700.0   # optical um; real Device A discs measure ~720
+    #: signed cup-centre offset from the BMO/disc axis (µm). Temporal (toward fovea)
+    #: on healthy discs — thinner temporal rim (ISNT).
+    onh_cup_offset_um: float = 0.0
     #: central retinal vessel trunk (caliber and its offset from the canal axis)
     disc_trunk_caliber_um: float = 240.0
     disc_trunk_offset_um: float = -90.0
@@ -319,11 +403,12 @@ class RetinaModel:
     # a wide scan stays in-window. `curvature_radius_um` sets the near-fovea radius.
     curvature_radius_um: float = 12000.0  # apex radius of curvature (~globe radius)
     curvature_sag_um: float = 1800.0      # depth-window overflow guard (not a shape knob)
-    #: Distance from the scan pivot (near the pupil) to the retina, µm. Drives the fan-beam
-    #: sag term in :meth:`_contour`. This is a SCAN-GEOMETRY quantity, not anatomy, so it is
-    #: kept separate from ``curvature_radius_um`` (which stays at its literature value).
-    pivot_distance_um: float = 20000.0
-    scan_distortion_correction: float = 0.86
+    #: Distance from the scan pivot (near the pupil) to the retina, µm. Optional fan-beam
+    #: sag in :meth:`_contour`. Default 0 — the term was calibrated against tilt-inflated
+    #: peak-to-peak sag and over-curved macula smiles; device flattening lives in
+    #: ``scan_distortion_correction`` instead.
+    pivot_distance_um: float = 0.0
+    scan_distortion_correction: float = 0.82
     curvature_conic: float = 0.0          # conic constant K (0=sphere, <-1 flattens periphery)
     curvature_concave: bool = True        # True = bowl (real posterior pole); False = legacy dome
     boundary_sharpness_um: float = 8.0    # axial reflectivity-transition width (softens bands)
@@ -344,6 +429,7 @@ class RetinaModel:
     henle_sign: float = 0.0              # -1..1 pupil-offset sign of the HFL asymmetry
     # volume-coherent texture (fixed 3-D fields; sampled per frame -> smooth across a volume)
     mottle_field: object = None          # CoherentField for intra-layer mottling
+    choroid_field: object = None         # CoherentField for choroid stroma mottle (under lumens)
     choroid_lumens: object = None        # list[ChoroidLumen]: the 3-D choroidal vessel bed
     # non-Rayleigh volume speckle: effective #scatterers per resolution cell (K-distribution
     # shape M). None = fully-developed Rayleigh (legacy). Small M => super-Rayleigh heavy tail.
@@ -353,7 +439,7 @@ class RetinaModel:
     #: Was 0.12 when the mixture was not variance-matched and the decorrelated component
     #: was white per A-line; both of those made the *effective* fraction move with the
     #: sampling pitch, so 0.12 was never the number it appeared to be. Re-fitted against
-    #: the lateral grain of the Maestro3 1024- and Maestro2 2048-A-line corpora together.
+    #: the lateral grain of the Device A 1024- and Device B 2048-A-line corpora together.
     #: It trades against inner-retina lamination monotonically: at f=0 ``inner_swing_db``
     #: matches real to +0.09 dB while the grain is 13.6 um too coarse, and at f=1 the grain
     #: is right to 0.4 um while the swing is 2.7 dB low. 0.75-0.85 is the window where both
@@ -498,14 +584,12 @@ class RetinaModel:
             disc = 1.0 - (1.0 + K) * (h / R) ** 2
             disc = np.maximum(disc, 1e-6)              # clamp (past the conic's real domain -> flat asymptote)
             bowl = (h * h / R) / (1.0 + np.sqrt(disc))
-        # FAN-BEAM term. Most of the curvature on a B-scan is not anatomy: the beam pivots
-        # near the pupil, so an A-line at lateral offset h travels an extra optical path
-        # p·(1 - cos(h/p)) ≈ h²/(2p) relative to the centre. Anatomy alone (R = 12 mm) gives
-        # h²/(2R) = 375 µm of sag over a 6 mm scan, but the measured Maestro3 sag is ~600 µm;
-        # closing that with the anatomic radius would require a 6.8 mm eye. This is the term
-        # docs/CURVATURE_FALLOFF.md identified and never built, and it is why a single fitted
-        # R could never be right at two different FOVs at once — the optimiser was using an
-        # anatomy knob to absorb a scan-geometry artifact.
+        # Optional FAN-BEAM term (off by default). Extra path p·(1-cos(h/p)) ≈ h²/(2p) for a
+        # pupil-pivot scan displayed on a rectangular raster. Previously defaulted on and
+        # sized so anatomic+fan matched Device A *peak-to-peak* RPE sag (~500-600 µm); that
+        # p2p number is mostly tilt/edge noise — the tilt-free bowl is ~310 µm, which the
+        # anatomic sphere (R=12 mm) plus device distortion already hits. Keep the term for
+        # deliberate wide-FOV experiments; do not use it to absorb a bad sag metric.
         p = float(getattr(self, "pivot_distance_um", 0.0) or 0.0)
         if p > 0:
             bowl = bowl + p * (1.0 - np.cos(np.clip(np.abs(xc) / p, 0.0, np.pi / 2)))
@@ -520,9 +604,9 @@ class RetinaModel:
         if self.curvature_sag_um > 0:
             s = float(self.curvature_sag_um)
             bowl = bowl / np.power(1.0 + np.power(bowl / s, 6.0), 1.0 / 6.0)
-        # Vendor scan-distortion correction: devices flatten the geometric sag by differing
-        # amounts (Maestro3 ~0.86, Maestro2 ~0.43), so this is a device parameter supplied by
-        # the config, not an anatomic one.
+        # Vendor scan-distortion correction: devices flatten the anatomic sag by differing
+        # amounts (Device A ~0.82, Device B ~0.67 on tilt-free 6 mm sag), so this is a device
+        # parameter supplied by the config, not an anatomic one.
         bowl = bowl * float(getattr(self, "scan_distortion_correction", 1.0))
         # concave-up: centre deepest (largest offset), periphery shallow (0)
         depth = (bowl.max() - bowl) if self.curvature_concave else bowl
@@ -584,12 +668,24 @@ class RetinaModel:
             t = np.clip(r_fov / np.maximum(pit_r, 1e-6), 0.0, 1.0)
             ss = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)           # 0 centre -> 1 outside
             for i, ly in enumerate(layers):
-                if ly.group == "nfl":
-                    t_phys[i] = base_t[i] * (0.02 + 0.98 * ss)
-                elif ly.group == "inner":
+                # NFL is stamped below by macular_nfl_thickness (wider than pit_radius).
+                if ly.group == "inner":
                     t_phys[i] = base_t[i] * ss
                 elif ly.group == "onl":
                     t_phys[i] = base_t[i] * (1.0 + self.onl_bulge * (1.0 - ss))
+
+        # Macular NFL eccentricity taper (+ soft GCL parafoveal peak). Applied after the
+        # shape-model / parametric fill so OCTA-500's fixed-ratio RNFL plateau and the
+        # parametric pit-cliff are both replaced by a progressive rise.
+        if self.location in ("macula", "onh"):
+            fovea_x, _ = self._landmarks()
+            r_fov = np.sqrt((x - fovea_x) ** 2 + (y_um - self.center_y_um) ** 2)
+            for i, ly in enumerate(layers):
+                if ly.group == "nfl":
+                    base = _nfl_parafoveal_base(t_phys[i], r_fov, fallback=ly.thickness_um)
+                    t_phys[i] = macular_nfl_thickness(r_fov, base_um=base)
+                elif ly.name == "GCL":
+                    t_phys[i] = t_phys[i] * macular_gcl_radial_gain(r_fov)
 
         # Peripapillary RNFL thickening. The shape model is fovea-centred and carries no
         # disc, so without this a 9 mm macular scan reaching toward the optic nerve shows a
@@ -615,7 +711,8 @@ class RetinaModel:
             i = choroid_idx[0]
             cross.features.append(ChoroidVasculature(
                 top_opt=cross.opt_b[i], bot_opt=cross.opt_b[i + 1],
-                lumens=(self.choroid_lumens or [])))
+                lumens=(self.choroid_lumens or []),
+                stroma_field=self.choroid_field))
         return cross
 
     _FIELD_ORDER = ["NFL", "canal", "GCL", "IPL", "INL", "OPL", "ONL",
@@ -645,6 +742,7 @@ class RetinaModel:
         (shape model) when available, else the parametric foveal-pit formula."""
         n_x = x.size
         fovea_x, _ = self._landmarks()
+        r_fov = np.sqrt((x - fovea_x) ** 2 + (y_um - self.center_y_um) ** 2)
         t = {}
         if self.data_thickness is not None:
             de = np.asarray(self.data_ecc_um, float)
@@ -653,21 +751,26 @@ class RetinaModel:
                 t[ly.name] = (self._radial_interp(dt[i], de, x, fovea_x, y_um)
                               if i < dt.shape[0] else np.full(n_x, ly.thickness_um))
         else:
-            r_fov = np.sqrt((x - fovea_x) ** 2 + (y_um - self.center_y_um) ** 2)
             side = np.tanh((x - fovea_x) / 150.0)
             pit_r = self.pit_radius_um * (1.0 + 0.35 * self.pit_asymmetry * side)
             s = np.clip(r_fov / np.maximum(pit_r, 1e-6), 0.0, 1.0)
             ss = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
             for ly in self.layers:
                 base = ly.thickness_um
-                if ly.group == "nfl":
-                    t[ly.name] = base * (0.02 + 0.98 * ss)
-                elif ly.group == "inner":
+                # NFL stamped below by macular_nfl_thickness (wider than pit_radius).
+                if ly.group == "inner":
                     t[ly.name] = base * ss
                 elif ly.group == "onl":
                     t[ly.name] = base * (1.0 + self.onl_bulge * (1.0 - ss))
                 else:
                     t[ly.name] = np.full(n_x, base)
+        # Progressive macular NFL (+ soft GCL peak); see macular_nfl_thickness.
+        for ly in self.layers:
+            if ly.group == "nfl":
+                base = _nfl_parafoveal_base(t[ly.name], r_fov, fallback=ly.thickness_um)
+                t[ly.name] = macular_nfl_thickness(r_fov, base_um=base)
+            elif ly.name == "GCL" and ly.name in t:
+                t[ly.name] = t[ly.name] * macular_gcl_radial_gain(r_fov)
         return t
 
     def _field_cross_section(self, y_um, x, wavelength_nm, fovea_x, disc_x) -> CrossSection:
@@ -708,9 +811,12 @@ class RetinaModel:
             # stack into a visible cliff.)
             term = _smoothstep(bmo - 100.0, bmo + 50.0, r_disc)    # 1 outside, 0 inside
             rim = 1.0 - _smoothstep(bmo, bmo + 280.0, r_disc)
-            # Steep-walled cup with a flatter floor, as measured: excavation is near-full
-            # out to ~half the BMO radius, then climbs sharply to the rim.
-            cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.12 * bmo, 0.88 * bmo, r_disc))
+            # Cup is narrower than the BMO and may sit temporally of the disc axis.
+            # Device A 6 mm disc frames: ILM half-max opening ~0.5–0.6 mm while BMO is
+            # wider; the old (0.12–0.88)·R profile made the cup nearly BMO-wide.
+            cup_x = float(disc_x) + float(self.onh_cup_offset_um)
+            r_cup = np.sqrt((x - cup_x) ** 2 + (y_um - self.center_y_um) ** 2)
+            cup = self.onh_cup_depth_um * (1.0 - _smoothstep(0.10 * bmo, 0.65 * bmo, r_cup))
             for nm in neuro:
                 t_final[nm] = t_mac[nm] * term                     # terminate at the BMO
             # The NFL is the one layer that does NOT terminate at the BMO: the nerve fibres
@@ -720,7 +826,8 @@ class RetinaModel:
             # deleted it over ~110 columns of a disc scan, leaving the rim bare.
             nfl_canal = 0.35 + 0.65 * _smoothstep(0.20 * bmo, bmo, r_disc)
             grad = nfl_disc_gradient(x, y_um, disc_x, self.center_y_um, bmo)
-            t_final["NFL"] = t_mac["NFL"] * grad * nfl_canal
+            # Local rim bulge on top of the long-range disc gradient.
+            t_final["NFL"] = t_mac["NFL"] * grad * nfl_canal * (1.0 + 0.35 * rim)
             # Canal fill depth. Real disc scans show signal ~650-700 um below the cup ILM
             # (prelaminar tissue + lamina); 260 um terminated the disc far too shallow.
             t_final["canal"] = 620.0 * (1.0 - term)
@@ -728,11 +835,57 @@ class RetinaModel:
 
         n_arr = np.array([ly.n for ly in layers])
         t_phys = np.array([t_final[nm] for nm in order])
+        # BMO-plane stack: full macular tissue thicknesses (NOT terminated), no cup, no
+        # canal fill. Anchors the outer complex at Bruch's level across the disc so RPE
+        # ends at the opening instead of diving to the cup floor (R3 positional half).
+        t_bmo = np.zeros_like(t_phys)
+        for i, nm in enumerate(order):
+            if nm == "canal":
+                t_bmo[i] = 0.0
+            elif nm in t_mac:
+                t_bmo[i] = t_mac[nm]
+            else:
+                t_bmo[i] = t_phys[i]
+        opt_bmo = np.zeros((len(order) + 1, n_x))
+        opt_bmo[0] = self.surface_opt_um + self._contour(x) + pit_depression
+        for i in range(len(order)):
+            opt_bmo[i + 1] = opt_bmo[i] + n_arr[i] * t_bmo[i]
+
         opt_b = np.zeros((len(order) + 1, n_x))
         opt_b[0] = self.surface_opt_um + self._contour(x) + pit_depression + cup
         for i in range(len(order)):
             opt_b[i + 1] = opt_b[i] + n_arr[i] * t_phys[i]
+        # Undulate BOTH stacks first. Snapping must land AFTER the monotone gap pass —
+        # otherwise canal (sandwiched between NFL and GCL in FIELD_ORDER) drags every
+        # terminated outer boundary back down to the canal floor via np.maximum.
         self._undulate(opt_b, x, y_um)
+        self._undulate(opt_bmo, x, y_um)
+        if disc_x is not None:
+            canal_i = order.index("canal")
+            # Bruch's level on the BMO stack: the floor of the deepest terminating layer
+            # (everything above `choroid`). Terminated layers collapse onto THIS ONE plane.
+            bruchs_plane = opt_bmo[order.index("choroid")]
+            for i, nm in enumerate(order):
+                if nm in ("NFL", "canal"):
+                    continue
+                thin = t_phys[i] < 1.0
+                if not np.any(thin):
+                    continue
+                # A terminated layer must end up with ZERO thickness, anchored at Bruch's
+                # rather than diving to the cup floor. Snapping each layer to its own
+                # opt_bmo[i] / opt_bmo[i + 1] cascades: consecutive iterations overwrite
+                # the floor the previous one just set, and opt_bmo carries FULL macular
+                # thicknesses, so every "terminated" layer got its thickness handed back
+                # and the outer complex never ended at the opening. One shared plane is
+                # order-independent. Do NOT write opt_b[i] when the previous layer is
+                # canal — that index is the canal floor and must stay deep (FIELD_ORDER
+                # puts canal between NFL and GCL).
+                if i - 1 != canal_i:
+                    opt_b[i] = np.where(thin, bruchs_plane, opt_b[i])
+                opt_b[i + 1] = np.where(thin, bruchs_plane, opt_b[i + 1])
+            ci = order.index("choroid")
+            opt_b[ci + 1] = np.maximum(opt_b[ci] + n_arr[ci] * t_phys[ci],
+                                        opt_b[ci] + 0.5)
         phys_b = np.zeros((len(order) + 1, n_x))
         for i in range(len(order)):
             phys_b[i + 1] = phys_b[i] + t_phys[i]
@@ -746,7 +899,8 @@ class RetinaModel:
         ci = order.index("choroid")
         cross.features.append(ChoroidVasculature(
             top_opt=cross.opt_b[ci], bot_opt=cross.opt_b[ci + 1],
-            lumens=(self.choroid_lumens or [])))
+            lumens=(self.choroid_lumens or []),
+            stroma_field=self.choroid_field))
         if disc_x is not None:
             kal = order.index("canal")
             cross.features.append(LaminaCribrosa(
@@ -789,7 +943,12 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         layers.append(replace(ly,
                               thickness_um=ly.thickness_um * float(rng.uniform(0.85, 1.15)),
                               backscatter=ly.backscatter * float(rng.uniform(0.8, 1.2))))
-    center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-80, 80))
+    onh_radius = float(rng.uniform(*ONH_RADIUS_RANGE_UM))
+    center_x = sample_center_x_um(
+        rng, location=location, lateral_fov_um=lateral_fov_um,
+        lateral_offset_um=lateral_offset_um, onh_radius_um=onh_radius)
+    disc_dx = float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0))
+    nasal = float(np.sign(disc_dx) or 1.0)   # + toward disc from fovea = nasal on the disc
 
     vessels = random_macular_vessels(rng, center_x_um=center_x,
                                      lateral_fov_um=lateral_fov_um, location=location)
@@ -799,7 +958,7 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         amp_um=float(rng.uniform(2.0, 6.0)), corr_um=float(rng.uniform(350.0, 600.0)))
     texture_contrast = float(rng.uniform(0.16, 0.30))
     choroid_contrast = float(rng.uniform(0.22, 0.36))     # subtle choroidal lucencies (averaged look)
-    mottle_field, _ = _texture_fields(rng, texture_contrast, choroid_contrast)
+    mottle_field, choroid_field = _texture_fields(rng, texture_contrast, choroid_contrast)
     choroid_lumens = random_choroid_lumens(rng, lateral_fov_um=lateral_fov_um)
 
     return RetinaModel(
@@ -811,9 +970,11 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         curvature_sag_um=float(rng.uniform(1700.0, 1900.0)),
         boundary_sharpness_um=float(rng.uniform(7.0, 11.0)),   # softer inter-layer transitions
         choroid_contrast=choroid_contrast,
-        onh_radius_um=float(rng.uniform(620.0, 820.0)),
+        onh_radius_um=onh_radius,
         onh_cup_depth_um=float(rng.uniform(*ONH_CUP_DEPTH_RANGE)),
-        disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
+        onh_cup_offset_um=-nasal * float(rng.uniform(40.0, 180.0)),   # temporal cup bias
+        disc_trunk_offset_um=nasal * float(rng.uniform(40.0, 160.0)),  # CRV enters nasally
+        disc_dx_um=disc_dx,
         tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
         pit_asymmetry=float(rng.uniform(-0.5, 0.5)),
         undulation=undulation,
@@ -822,7 +983,8 @@ def random_retina(rng: np.random.Generator, *, location: str = "macula",
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         directional_strength=float(rng.uniform(0.45, 0.75)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
-        mottle_field=mottle_field, choroid_lumens=choroid_lumens,
+        mottle_field=mottle_field, choroid_field=choroid_field,
+        choroid_lumens=choroid_lumens,
         vessels=vessels)
 
 

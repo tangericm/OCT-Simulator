@@ -82,7 +82,7 @@ def test_directional_reflectance_fades_photoreceptors_but_not_rpe():
     from octsim.anatomy.retina import RetinaModel, RETINA_LAYERS
 
     # Steep curvature so the photoreceptor band is clearly tilted at the scan edge. The sag
-    # limit is kept well clear of the actual sag (~790 µm here, anatomic + fan-beam): it is a
+    # limit is kept well clear of the actual anatomic sag (~580 µm at R=8 mm): it is a
     # depth-window overflow guard, not a shape knob, and letting it engage would compress the
     # peripheral slope that this test is about.
     m = RetinaModel(location="macula", center_x_um=3000.0, directional_strength=0.7,
@@ -132,7 +132,7 @@ def test_rpe_curve_survives_a_shallow_frame():
     Deep frames never reach the bound, so this only ever showed up on display-domain data.
     """
     from octsim import realism_metrics as rmet
-    for n_depth, dz, sag_um in [(1024, 3.87, 480.0),   # Maestro-like: window not reached
+    for n_depth, dz, sag_um in [(1024, 3.87, 480.0),   # device-like: window not reached
                                 (640, 3.00, 300.0),    # OCTA-500-like
                                 (500, 2.00, 250.0),    # shallow: the aliasing case
                                 (500, 2.00, 400.0)]:

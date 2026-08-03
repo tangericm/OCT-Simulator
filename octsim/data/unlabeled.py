@@ -100,8 +100,40 @@ def bundled_texture(name: str = "default") -> TextureProfile:
     """Load a bundled :class:`TextureProfile` (default: the pooled multi-dataset NORMAL prior)."""
     fn = _BUNDLED_TEXTURE.get(name, name)
     if not os.path.isabs(fn):
-        fn = os.path.join(os.path.dirname(__file__), fn)
+        # bare corpus keywords (device_a_macula, …) live as texture_<name>.json
+        cand = os.path.join(os.path.dirname(__file__), fn)
+        if not os.path.isfile(cand) and name not in _BUNDLED_TEXTURE:
+            alt = os.path.join(os.path.dirname(__file__), f"texture_{name}.json")
+            if os.path.isfile(alt):
+                cand = alt
+        fn = cand
     return TextureProfile.load(fn)
+
+
+def bundled_texture_meta(name: str) -> dict | None:
+    """Load the sidecar ``texture_<name>_meta.json`` if present (alines, pitches, SNR).
+
+    Real device targets store acquisition geometry here — not on
+    :class:`TextureProfile` — so calibration renders can match the corpus A-line
+    pitch. Returns ``None`` when no sidecar exists (pooled / clinical priors).
+    """
+    import json
+    d = os.path.dirname(__file__)
+    # bundled alias → texture_*.json stem; raw corpus names already match the stem
+    fn = _BUNDLED_TEXTURE.get(name)
+    if fn is not None:
+        stem = os.path.splitext(fn)[0]
+    else:
+        stem = f"texture_{name}"
+    path = os.path.join(d, f"{stem}_meta.json")
+    if not os.path.isfile(path):
+        # also accept texture_<name>_meta.json when name was already a full stem
+        alt = os.path.join(d, f"texture_{name}_meta.json")
+        path = alt if os.path.isfile(alt) else path
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def pool_textures(profiles) -> TextureProfile:
@@ -174,7 +206,7 @@ def _detect_ilm_rpe(img, smooth=7, axial_pitch_um=3.87, max_retina_um=900.0, bor
                     dc_skip=18):
     """Column-wise ILM (tissue onset) and RPE (deepest bright outer band), or (None, None).
 
-    Two failure modes on these Topcon recons are handled explicitly:
+    Two failure modes on these device recons are handled explicitly:
 
     * a bright **DC / zero-delay band** at the very top (the device crops it, our recon does not)
       would otherwise be picked as the ILM — the first ``dc_skip`` rows are ignored and the ILM is

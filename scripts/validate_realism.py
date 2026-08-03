@@ -1,16 +1,16 @@
 """Measure the sim-vs-real distance vector and gate on it.
 
-Reconstructs a real Maestro corpus and renders matched simulated frames through the
+Reconstructs a real device corpus and renders matched simulated frames through the
 *same* metric code (:mod:`octsim.realism_metrics`), then prints a signed delta table.
 
     # baseline against the dense 6 mm line scan
-    python scripts/validate_realism.py --folder ".../Maestro3/6mm_1024Aline" --fov-um 6000
+    python scripts/validate_realism.py --folder ".../Device A/6mm_1024Aline" --fov-um 6000
 
     # after changing optics, compare two profiles head to head
     python scripts/validate_realism.py --folder ... --optics literature --json runs/before.json
-    python scripts/validate_realism.py --folder ... --optics maestro3   --json runs/after.json
+    python scripts/validate_realism.py --folder ... --optics device_a   --json runs/after.json
 
-Real and simulated frames are rendered on the same depth pitch (the Maestro3 instrument
+Real and simulated frames are rendered on the same depth pitch (the Device A instrument
 model gives 3.87 µm/px at 2048 spectral samples), so band offsets in optical µm land on
 the same tissue in both.
 
@@ -45,11 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from octsim import realism_metrics as rmet
 from octsim.config import SimConfig
-from octsim.data import display_domain, real_maestro
+from octsim.data import display_domain, real_device
 from octsim.generate import simulate
-
-#: 6 dB roll-off measured from the Maestro3 mirror scans (octsim/data/instrument_maestro3.json)
-MAESTRO3_FALLOFF_UM = 1959.9
 
 
 def _default_data_root() -> str:
@@ -64,7 +61,7 @@ def _default_data_root() -> str:
 
 def measure_real(folder: str, *, n_frames: int, stride: int, fov_um: float,
                  axial_pitch_um: float):
-    imgs, alines, n_skipped = real_maestro.load_corpus(folder, limit=n_frames, stride=stride)
+    imgs, alines, n_skipped = real_device.load_corpus(folder, limit=n_frames, stride=stride)
     if not imgs:
         raise RuntimeError(f"no frames reconstructed from {folder}")
     if n_skipped:
@@ -74,10 +71,13 @@ def measure_real(folder: str, *, n_frames: int, stride: int, fov_um: float,
     return [rmet.measure(db, axial_pitch_um, dx) for db in imgs], alines, dx
 
 
-#: Optical depth that puts the simulated ILM at roughly the same row as the real Maestro3
+#: Optical depth that puts the simulated ILM at roughly the same row as the real Device A
 #: corpus (real ILM ~210-220 rows at 3.87 µm/px). Matching it keeps the vitreous sampling
 #: window clear of the DC band and makes the roll-off act over the same depth range.
-SAMPLE_DEPTH_UM = 430.0
+#: Bumped 430 → 500 (plan C), then 500 → 640 to close the residual
+#: ~150 µm mean-A-line / ILM shallow offset vs Device A 6mm_1024Aline (ILM row 176→212
+#: vs real 213; tissue peak ~1190→1335 µm vs real ~1310 µm).
+SAMPLE_DEPTH_UM = 640.0
 
 
 def measure_sim(*, n_seeds: int, alines: int, fov_um: float, anatomy: str,
@@ -94,7 +94,8 @@ def measure_sim(*, n_seeds: int, alines: int, fov_um: float, anatomy: str,
             location=anatomy,
             lateral_fov_um=fov_um,
             lines_per_frame=alines,
-            falloff_6db_um=MAESTRO3_FALLOFF_UM,
+            # falloff comes from Instrument JSON via effective_falloff_6db_um() —
+            # do not hard-code Device A here (that broke Device B / other devices).
             sample_depth_um=sample_depth_um,
             scan_distortion_correction=distortion,
             noise_level=noise_level,
@@ -145,7 +146,7 @@ def _waiver_note(xfail, xpass) -> str:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--folder", required=True, help="real Maestro scan folder (bscan*.raw + .CLB)")
+    p.add_argument("--folder", required=True, help="real device scan folder (bscan*.raw + .CLB)")
     p.add_argument("--fov-um", type=float, default=6000.0)
     p.add_argument("--axial-pitch-um", type=float, default=3.87)
     p.add_argument("--frames", type=int, default=8, help="real frames to measure")
@@ -154,7 +155,7 @@ def main() -> int:
     p.add_argument("--seed0", type=int, default=7)
     p.add_argument("--anatomy", default="macula", choices=["macula", "onh", "periphery"])
     p.add_argument("--optics", default="literature")
-    p.add_argument("--instrument", default="maestro3")
+    p.add_argument("--instrument", default="device_a")
     p.add_argument("--shape-model", default="normal")
     p.add_argument("--json", default="", help="write the raw metric vectors here")
     p.add_argument("--holdout", action="append", default=[],

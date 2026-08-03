@@ -21,8 +21,8 @@ Two ways to get a profile:
 whose optics and curvature match the data. Nothing here touches the labels — the simulator
 still emits exact per-pixel layer maps, so calibrated scans stay fully annotated.
 
-No real OCT data ships with the repo; see ``docs/CALIBRATION.md`` for the (image, boundaries)
-contract and how to point this at a Maestro export or a public segmented dataset.
+No real OCT data ships with the repo; see the calibration notes for the (image, boundaries)
+contract and how to point this at a device export or a public segmented dataset.
 """
 
 from __future__ import annotations
@@ -81,6 +81,9 @@ class CalibrationProfile:
     vitreous_backscatter: float = 5.0e-4   # faint vitreous fill above the ILM (mean)
     directional_strength: float = 0.60     # 0 = isotropic; scales Stiles-Crawford + Henle (mean)
     speckle_shape: float | None = None     # K-dist effective #scatterers M; None = fully-developed Rayleigh
+    #: Fraction of speckle power with the instrument's lateral decorrelation length
+    #: (see RetinaModel.speckle_decorrelation). Tuned jointly with inner backscatter (R1c).
+    speckle_decorrelation: float = 0.75
     n_scans: int = 0                       # provenance: how many real B-scans were averaged
     source: str = "literature"
 
@@ -106,6 +109,24 @@ class CalibrationProfile:
 
 
 # --------------------------------------------------------------------------- literature
+#: Mild relative backscatter multipliers on :data:`RETINA_LAYERS` for the literature
+#: optics profile. Tuned against Device A macula band contrasts / inner swing (R1c
+#: photometry, 2026-07-31) — not a free µ invent. Avoids RPE/EZ boosts that tip
+#: ``choroid_dark_frac_4db`` over the gate at the validate seed set; identity = leave
+#: the layer table as-is.
+#:
+#: NFL was re-lifted 1.12→1.55 (GCL 0.90→0.95) so **parafoveal** columns show a clear
+#: ILM-adjacent bright RNFL band: the prior inner-lamination nudge left IPL/OPL ~1.8×
+#: brighter than NFL in linear reflectivity, so the top inner strip washed out even
+#: while full-FOV ``inner_swing_db`` passed. 1.80 overshot Device B ``inner_swing_db``
+#: (+3.0 > 2.5); 1.55 keeps NFL > IPL parafoveally without reopening that gate.
+#: Outer (RPE/EZ) scales stay untouched.
+_LITERATURE_BS_SCALE = {
+    "NFL": 1.55, "GCL": 0.95, "IPL": 1.35, "INL": 0.88, "OPL": 1.35,
+    "ONL": 0.82, "OS": 0.90,
+}
+
+
 def literature_profile() -> CalibrationProfile:
     """A normative profile seeded from the canonical layer table + published values.
 
@@ -113,18 +134,30 @@ def literature_profile() -> CalibrationProfile:
     bright; GCL/INL/ONL dark); the curvature is the concave posterior-pole bowl; the
     boundary width is a few microns of biological transition. Use as the zero-data
     starting point, then override with :func:`extract_profile` when real scans arrive.
+
+    Relative layer amplitudes include a Device A photometry nudge
+    (:data:`_LITERATURE_BS_SCALE`) — including a parafoveal RNFL lift so the
+    ILM-adjacent band stays brighter than IPL — plus a slightly lower vitreous
+    fill so inner↔vitreous / RPE↔ONL / inner-swing sit nearer the real macula
+    ladder without flipping ``optics_profile`` off ``literature`` or fitting µ.
     """
     from .anatomy.retina import RETINA_LAYERS
 
     layers = []
     for ly in RETINA_LAYERS:
         layers.append(LayerCal(
-            name=ly.name, reflectivity=float(ly.backscatter),
+            name=ly.name,
+            reflectivity=float(ly.backscatter) * _LITERATURE_BS_SCALE.get(ly.name, 1.0),
             attenuation_per_um=float(ly.mu_s_per_mm) * 1e-3,
             speckle_contrast=1.0, thickness_um=float(ly.thickness_um),
             thickness_std_um=0.12 * float(ly.thickness_um),
-            specular=(0.02 if ly.name == "NFL" else 0.0)))
-    return CalibrationProfile(layers=layers, source="literature")
+            # Slight ILM specular lift so the RNFL edge reads as a bright sheet;
+            # keep well below levels that steal the per-column max from EZ/RPE.
+            specular=(0.024 if ly.name == "NFL" else 0.0)))
+    return CalibrationProfile(
+        layers=layers, source="literature",
+        vitreous_backscatter=4.5e-4,
+    )
 
 
 # --------------------------------------------------------------------------- extraction
@@ -420,7 +453,8 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
     unaffected — the sampled thickness field just drives the physics forward model.
     """
     from .anatomy.retina import (RETINA_LAYERS, RetinaModel, BoundaryUndulation,
-                                 ONH_CUP_DEPTH_RANGE)
+                                 ONH_CUP_DEPTH_RANGE, ONH_RADIUS_RANGE_UM,
+                                 sample_center_x_um)
 
     optics = optics or literature_profile()
     opt_by_name = {ly.name: ly for ly in optics.layers}
@@ -450,7 +484,12 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
             interface_reflectivity=(oc.specular if (oc and oc.specular > 0)
                                     else canon.interface_reflectivity)))
 
-    center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-60, 60))
+    onh_radius = float(rng.uniform(*ONH_RADIUS_RANGE_UM))
+    center_x = sample_center_x_um(
+        rng, location=location, lateral_fov_um=lateral_fov_um,
+        lateral_offset_um=lateral_offset_um, onh_radius_um=onh_radius)
+    disc_dx = float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0))
+    nasal = float(np.sign(disc_dx) or 1.0)
     # shared vessel builder — subtle shadows + the real OCTA-500 avascular-zone radius, so the
     # default (shape-model) path and the parametric path stay in lock-step.
     from .anatomy.retina import random_macular_vessels
@@ -462,7 +501,7 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
                                    corr_um=float(rng.uniform(350.0, 600.0)))
     from .anatomy.retina import _texture_fields, random_choroid_lumens
     texture_contrast = _eye_jitter(rng, optics.texture_contrast)
-    mottle_field, _ = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
+    mottle_field, choroid_field = _texture_fields(rng, texture_contrast, optics.choroid_contrast)
     choroid_lumens = random_choroid_lumens(rng, lateral_fov_um=lateral_fov_um)
     return RetinaModel(
         location=location, layers=layers, surface_opt_um=surface_opt_um, center_x_um=center_x,
@@ -470,16 +509,20 @@ def retina_from_shape_model(shape, rng: np.random.Generator, *, optics: "Calibra
         curvature_radius_um=optics.curvature_radius_um, curvature_sag_um=optics.curvature_sag_max_um,
         curvature_concave=optics.curvature_concave, boundary_sharpness_um=optics.boundary_sharpness_um,
         choroid_contrast=optics.choroid_contrast, tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
-        disc_dx_um=float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0)),
+        disc_dx_um=disc_dx,
         onh_cup_depth_um=float(rng.uniform(*ONH_CUP_DEPTH_RANGE)),
-        onh_radius_um=float(rng.uniform(620.0, 820.0)),
+        onh_radius_um=onh_radius,
+        onh_cup_offset_um=-nasal * float(rng.uniform(40.0, 180.0)),
+        disc_trunk_offset_um=nasal * float(rng.uniform(40.0, 160.0)),
         texture_contrast=texture_contrast, interface_jitter=_eye_jitter(rng, optics.interface_jitter),
         vitreous_backscatter=_eye_jitter(rng, optics.vitreous_backscatter),
         directional_strength=float(np.clip(_eye_jitter(rng, optics.directional_strength), 0.0, 1.0)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
         speckle_shape=optics.speckle_shape,   # pass the mean directly: no rng draw => label map invariant
+        speckle_decorrelation=float(getattr(optics, "speckle_decorrelation", 0.75)),
         curvature_conic=float(getattr(optics, "curvature_conic", 0.0)),
-        mottle_field=mottle_field, choroid_lumens=choroid_lumens,
+        mottle_field=mottle_field, choroid_field=choroid_field,
+        choroid_lumens=choroid_lumens,
         data_thickness=data_thick, data_ecc_um=shape.ecc_grid_um, vessels=vessels)
 
 
@@ -491,7 +534,8 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
     reflectivity/attenuation/curvature/boundary-sharpness come straight from the data.
     """
     from .anatomy.retina import (RETINA_LAYERS, RetinaModel, BoundaryUndulation,
-                                 ONH_CUP_DEPTH_RANGE)
+                                 ONH_CUP_DEPTH_RANGE, ONH_RADIUS_RANGE_UM,
+                                 sample_center_x_um)
     from .features import BloodVessel
 
     cal_by_name = {ly.name: ly for ly in profile.layers}
@@ -508,7 +552,12 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
             mu_s_per_mm=c.attenuation_per_um * 1e3,
             interface_reflectivity=(c.specular if c.specular > 0 else ly.interface_reflectivity)))
 
-    center_x = lateral_fov_um / 2.0 + float(lateral_offset_um) + float(rng.uniform(-80, 80))
+    onh_radius = float(rng.uniform(*ONH_RADIUS_RANGE_UM))
+    center_x = sample_center_x_um(
+        rng, location=location, lateral_fov_um=lateral_fov_um,
+        lateral_offset_um=lateral_offset_um, onh_radius_um=onh_radius)
+    disc_dx = float(rng.choice([-1.0, 1.0]) * rng.uniform(4300.0, 5200.0))
+    nasal = float(np.sign(disc_dx) or 1.0)
     n_vessels = int(rng.integers(2, 6))
     vessels = []
     for _ in range(n_vessels):
@@ -536,11 +585,17 @@ def retina_from_profile(profile: CalibrationProfile, rng: np.random.Generator, *
         choroid_contrast=profile.choroid_contrast,
         tilt_um_per_mm=float(rng.uniform(-25.0, 25.0)),
         pit_asymmetry=float(rng.uniform(-0.5, 0.5)), undulation=undU,
+        onh_radius_um=onh_radius,
+        onh_cup_depth_um=float(rng.uniform(*ONH_CUP_DEPTH_RANGE)),
+        onh_cup_offset_um=-nasal * float(rng.uniform(40.0, 180.0)),
+        disc_trunk_offset_um=nasal * float(rng.uniform(40.0, 160.0)),
+        disc_dx_um=disc_dx,
         texture_contrast=float(rng.uniform(0.16, 0.30)),
         interface_jitter=float(rng.uniform(0.20, 0.40)),
         vitreous_backscatter=float(rng.uniform(3.0e-4, 7.0e-4)),
         directional_strength=float(rng.uniform(0.45, 0.75)),
         henle_sign=float(rng.choice([-1.0, 0.0, 1.0]) * rng.uniform(0.5, 1.0)),
         speckle_shape=profile.speckle_shape,   # mean directly: no rng draw => label map invariant
+        speckle_decorrelation=float(getattr(profile, "speckle_decorrelation", 0.75)),
         curvature_conic=float(getattr(profile, "curvature_conic", 0.0)),
         vessels=vessels)

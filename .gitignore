@@ -25,4 +25,11 @@ runs/
 duke*/
 # ...but DO track the small fitted shape-model artifacts
 !octsim/data/*.npz
-octsim/data/retina_optics_r1b.json
+
+# Private research workspace: experiments, calibration runs, fitting scripts, and the
+# internal findings log. Never published — see .research/README.md.
+.research/
+
+# Local tooling / analysis artifacts
+graphify-out/
+.claude/

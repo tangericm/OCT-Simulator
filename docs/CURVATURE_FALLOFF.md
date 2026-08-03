@@ -80,3 +80,10 @@ just magnitude (targets rebuilt).
 ## Honest limitations
 - octc8/octid deep envelopes differ (8-bit clinical-JPEG domain); their curve/falloff terms are
   judge-only and excluded from the pool fit.
+
+## Macula smile / sag-metric fix (2026-07-31)
+
+The fan-beam default and 0.86/0.43 distortion pair were calibrated to **peak-to-peak** RPE sag.
+On Device A that p2p (~500–600 µm) is mostly tilt/edge noise; the tilt-free bowl is ~310 µm.
+Fan-beam is now off by default; distortion is 0.82/0.67 vs tilt-free sag; `sag_optical_um` is
+the quadratic \|a2\|·dz bowl depth.

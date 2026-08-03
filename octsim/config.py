@@ -36,6 +36,9 @@ DISPERSION_A2_UNIT = 15.0
 SCAN_PATTERNS = ("bscan", "volume")
 ANATOMIES = ("macula", "onh", "periphery", "mirror", "paper", "cornea")
 
+#: Bare (no-instrument) reference-arm field amplitude.
+DEFAULT_REFERENCE_AMP = 4.0
+
 
 def _axial_res_from_bandwidth(lambda0_nm: float, bw_nm: float) -> float:
     lam = lambda0_nm * 1e-3
@@ -94,30 +97,30 @@ class SimConfig:
     lateral_fov_um: float = 1000.0
     lines_per_frame: int = 512
     lateral_resolution_um: float = 0.0      # >0 specify; 0 -> use beam_waist_um
-    #: Distance from the scan pivot (near the pupil) to the retina, µm. Drives the
-    #: fan-beam sag term. This is SCAN GEOMETRY, not anatomy, and it is device-specific:
-    #: measured B-scan sag over a nominal 6 mm scan is ~504 µm on the Maestro3 corpus but
-    #: ~249 µm on Maestro2 — less than the anatomic term alone — because vendors apply
-    #: different amounts of scan-distortion correction. Fitting it once and baking it into
-    #: the retina model made every held-out corpus over-curve. 0 disables the term.
-    pivot_distance_um: float = 20000.0
-    #: Fraction of the geometric sag (anatomic bowl + fan-beam) that survives the vendor's
-    #: scan-distortion correction. 1.0 = raw geometry, 0.0 = fully flattened.
-    #: MEASURED per device against a nominal 6 mm B-scan, raw geometric sag ~585 µm:
-    #:   Maestro3  504 µm -> 0.86      Maestro2  249 µm -> 0.43
-    #:   OCTA-500   41 µm -> 0.28 (at 3 mm)
-    #: Devices differ by more than 2x, so this cannot be a universal constant; it is the
-    #: single knob that made every held-out corpus over-curve when it was baked in at the
-    #: Maestro3 value. Calibrate it per corpus, do not fit it globally.
+    #: Distance from the scan pivot (near the pupil) to the retina, µm. Drives an optional
+    #: fan-beam sag term. Default 0: the fan-beam was previously calibrated against
+    #: peak-to-peak RPE sag, which on Device A is dominated by scan tilt / edge noise
+    #: (~500-600 µm) rather than the true posterior-pole bowl (~310 µm). That double-count
+    #: made macula B-scans look too "smiley". Leave available for wide-FOV experiments;
+    #: device differences belong in ``scan_distortion_correction``.
+    pivot_distance_um: float = 0.0
+    #: Fraction of the anatomic bowl that survives the vendor's scan-distortion
+    #: correction. 1.0 = raw geometry, 0.0 = fully flattened.
+    #: MEASURED per device against tilt-free quadratic sag on a nominal 6 mm B-scan
+    #: (raw anatomic sag at R=12 mm ≈ 381 µm):
+    #:   Device A  ~311 µm -> 0.82      Device B  ~257 µm -> 0.67
+    #:   OCTA-500   ~41 µm -> 0.28 (at 3 mm; still on the older p2p scale)
+    #: Earlier 0.86 / 0.43 values tracked peak-to-peak sag and over-stated the Device A
+    #: bowl (tilt inflation). Calibrate per corpus against tilt-free sag, not globally.
     #:
-    #: ``None`` (the default) means "take it from ``instrument``, or 0.86 if that device
+    #: ``None`` (the default) means "take it from ``instrument``, or 0.82 if that device
     #: does not carry one". An explicit float always wins. It cannot use the codebase's
     #: usual ``0`` sentinel because 0.0 already means something here — fully flattened.
     scan_distortion_correction: float | None = None
     beam_waist_um: float = 15.0
     #: Lateral correlation length of the sub-resolution speckle decorrelation, µm
     #: (Gaussian σ of the field). An INSTRUMENT property, and a **physical length**: one
-    #: value reproduces the measured lateral speckle grain of all seven Maestro corpora,
+    #: value reproduces the measured lateral speckle grain of all seven device corpora,
     #: which span 2.93–23.44 µm of A-line pitch. Fitting the metric directly against those
     #: corpora gives σ ≈ 5 µm; the shipped 4 µm is the value that lands the *rendered*
     #: grain on target, because the beam-filtered component contributes as well. See the
@@ -136,7 +139,12 @@ class SimConfig:
     # Single intuitive tuning knob: 0 = sharp (transform-limited); increasing
     # magnitude = more axial stretch/blur; sign flips the chirp direction.
     dispersion: float = 0.0
-    falloff_6db_um: float = 0.0             # 0 -> no roll-off
+    #: Sensitivity roll-off depth (µm) where intensity drops 6 dB. ``None`` (default)
+    #: means "take it from ``instrument`` if measured, else off". An explicit float
+    #: always wins — including ``0.0``, which disables roll-off. Same sentinel pattern
+    #: as :attr:`scan_distortion_correction`: ``0`` already means something (off), so
+    #: it cannot double as "unset".
+    falloff_6db_um: float | None = None
     #: render the scene onto the full n_k depth grid so structure deeper than z_max
     #: aliases back into the image, as it does on a real device (disc scans, and any
     #: mis-positioned retina). Costs one extra factor of 2 on the reflectivity build.
@@ -145,18 +153,16 @@ class SimConfig:
     # --- noise ---
     noise_free: bool = False
     noise_level: float = 1.0
-    # Noise coefficients, all calibrated together against the Maestro3 6 mm corpus
-    # (scripts/validate_realism.py, and the device's own measured SNR of 52.0 dB recorded
-    # in octsim/data/texture_maestro3_macula_meta.json). The previous values put every
-    # tissue band ~11 dB closer to the noise floor than real data: the inner retina sat
-    # 7 dB above the floor where real sits at 18 dB, and half the neurosensory retina was
-    # within 3 dB of the floor. The floor here is shot-dominated, so all three had to move
-    # together — cutting the read term alone changes the floor by ~1 dB.
+    # Noise coefficients from physics MLE on Device A mirror temporal spectra
+    # (an offline spectral-MLE fit → ``octsim/data/spectral_mle_device_a.json``).
+    # Heteroscedastic Gaussian on I(k): σ² = shot²|μ| + rin²μ² + read_abs². Mirror preferred
+    # over tissue line scans so motion/speckle do not inflate RIN. Electronic-tail subtracted
+    # before the fit so the spectral edges pin ``read``.
     shot: float = 0.0075
     rin: float = 0.00125
     #: read-noise coefficient, as a fraction of the reference-arm DC level (see
     #: :meth:`_resolve_noise` — it is converted to an absolute std at resolve time).
-    read: float = 0.0025
+    read: float = 0.0020992
     target_snr_db: float = 0.0              # >0 -> back-solve the read floor
     averages: int = 1                       # incoherent B-scan averages (1 = raw; >1 = ART-like)
 
@@ -170,21 +176,24 @@ class SimConfig:
     # --- scene ---
     anatomy: str = "macula"
     location: str = "macula"                # kept in sync with anatomy for retinal scenes
-    sample_depth_um: float = 200.0          # optical depth of the anterior surface (sample position)
+    sample_depth_um: float = 640.0          # optical depth of the anterior surface (sample position)
     sample_lateral_offset_um: float = 0.0   # lateral shift of the anatomy centre within the FOV
     #: data-driven geometry from a learned shape model: "normal"/"jhu" = bundled healthy-eye
     #: model (default), "duke"/"dme" = diabetic-macular-edema model, a .npz path, or
     #: "parametric"/"none" for the hand-tuned pit.
     shape_model: str = "normal"
-    #: tissue-optics profile (backscatter/attenuation/appearance): "literature" (default; the
-    #: shipped optics) or a fitted keyword/path ("maestro3", …). Optics never touch geometry,
-    #: so this leaves ``label_map`` bit-identical at a fixed seed.
+    #: Tissue-optics profile keyword. Default stays ``"literature"`` until an R1c fit
+    #: improves held-out realism gates (plan B3) — do not flip to ``"device_a"`` on a
+    #: texture-D drop alone (R1b showed that invents unphysical µ). Optics never touch
+    #: geometry, so switching profile keeps ``label_map`` bit-identical at a fixed seed.
     optics_profile: str = "literature"
     #: measured instrument grounding (source envelope P(k)/λ0/n_k/background/read floor):
-    #: "" = the closed-form Gaussian source (default, unchanged); "maestro3" or a JSON path
+    #: "" = the closed-form Gaussian source (default, unchanged); "device_a" or a JSON path
     #: overlays the frozen Tier-1 measurements in :meth:`resolve`.
     instrument: str = ""
-    reference_amp: float = 4.0
+    #: Reference-arm field amplitude. ``None`` = take :attr:`Instrument.reference_amp` when
+    #: an instrument is set, else :data:`DEFAULT_REFERENCE_AMP`. Explicit float always wins.
+    reference_amp: float | None = None
 
     # --- batch ---
     n_samples: int = 1
@@ -206,16 +215,20 @@ class SimConfig:
         self.duty_cycle = min(1.0, max(1e-3, float(self.duty_cycle)))
         self.flyback_time_s = max(0.0, float(self.flyback_time_s))
         self.noise_level = max(0.0, float(self.noise_level))
-        self.reference_amp = max(1e-6, float(self.reference_amp))
+        if self.reference_amp is not None:
+            self.reference_amp = max(1e-6, float(self.reference_amp))
         self.averages = max(1, int(round(self.averages)))
         self.n_samples = max(1, int(round(self.n_samples)))
         self.seed = int(self.seed)
 
         for name in ("bandwidth_fwhm_nm", "axial_resolution_um", "axial_range_um",
-                     "axial_sampling_um", "lateral_resolution_um", "falloff_6db_um",
+                     "axial_sampling_um", "lateral_resolution_um",
                      "target_snr_db", "motion_level", "axial_motion_um", "phase_drift_rad",
                      "sample_depth_um"):
             setattr(self, name, max(0.0, float(getattr(self, name))))
+        # falloff uses None = "from instrument"; an explicit value is clamped ≥ 0
+        if self.falloff_6db_um is not None:
+            self.falloff_6db_um = max(0.0, float(self.falloff_6db_um))
         self.sample_lateral_offset_um = float(self.sample_lateral_offset_um)  # signed
         self.shape_model = str(self.shape_model or "")
         self.optics_profile = str(self.optics_profile or "literature")
@@ -316,7 +329,8 @@ class SimConfig:
             n_frames=geometry.n_frames, duty_cycle=self.duty_cycle,
             flyback_time_s=self.flyback_time_s)
 
-        noise = self._resolve_noise(source, inst)
+        ref_amp = self.effective_reference_amp(inst)
+        noise = self._resolve_noise(source, inst, reference_amp=ref_amp)
 
         derived = {
             "bandwidth_fwhm_nm": bw,
@@ -341,8 +355,8 @@ class SimConfig:
             speckle_corr_lateral_um=self.speckle_corr_lateral_um,
             pivot_distance_um=self.pivot_distance_um,
             scan_distortion_correction=self.effective_scan_distortion(),
-            reference_amp=self.reference_amp, dispersion_coeffs=disp_coeffs,
-            falloff_6db_um=self.falloff_6db_um, axial_wrap=bool(self.axial_wrap),
+            reference_amp=ref_amp, dispersion_coeffs=disp_coeffs,
+            falloff_6db_um=self.effective_falloff_6db_um(), axial_wrap=bool(self.axial_wrap),
             noise=noise, averages=self.averages,
             motion_level=self.motion_level, axial_motion_um=self.axial_motion_um,
             phase_drift_rad=self.phase_drift_rad, cardiac=self.cardiac,
@@ -350,9 +364,9 @@ class SimConfig:
             scan_pattern=self.scan_pattern, sample_depth_um=self.sample_depth_um,
             sample_lateral_offset_um=self.sample_lateral_offset_um, derived=derived)
 
-    #: Applied when neither the config nor the instrument names a value. It is the Maestro3
+    #: Applied when neither the config nor the instrument names a value. It is the Device A
     #: number, kept only so a config with no instrument renders as it always has.
-    DEFAULT_SCAN_DISTORTION = 0.86
+    DEFAULT_SCAN_DISTORTION = 0.82
 
     def effective_scan_distortion(self) -> float:
         """Vendor scan-distortion correction actually in force: config > instrument > default.
@@ -374,7 +388,40 @@ class SimConfig:
                 pass
         return float(self.DEFAULT_SCAN_DISTORTION)
 
-    def _resolve_noise(self, source=None, instrument=None) -> NoiseModel:
+    def effective_falloff_6db_um(self) -> float:
+        """Sensitivity roll-off actually in force: config > instrument (>0) > off (0).
+
+        Mirror of :meth:`effective_scan_distortion`. ``Instrument.falloff_6db_um`` is
+        measured from mirror scans (~1960 µm on Device A) and was previously loaded then
+        ignored — ``resolve()`` only passed ``SimConfig.falloff_6db_um``, which defaulted
+        to off, while ``validate_realism.py`` hard-coded the Device A value.
+        """
+        if self.falloff_6db_um is not None:
+            return float(self.falloff_6db_um)
+        if self.instrument:
+            try:
+                from .instrument import load_instrument
+                v = float(load_instrument(self.instrument).falloff_6db_um or 0.0)
+                if v > 0.0:
+                    return v
+            except Exception:
+                pass
+        return 0.0
+
+    def effective_reference_amp(self, instrument=None) -> float:
+        """Reference-arm amplitude actually in force: explicit config > default.
+
+        ``Instrument.reference_amp`` is a Tier-1 *seed* (DC/tail ratio), not a
+        drop-in sim amplitude: adopting the Device A value (12) without a matching
+        noise re-tune collapses image SNR by scaling ``read_abs ∝ a_ref²``. Keep the
+        sim default unless the user sets ``reference_amp`` explicitly.
+        """
+        if self.reference_amp is not None:
+            return max(1e-6, float(self.reference_amp))
+        return float(DEFAULT_REFERENCE_AMP)
+
+    def _resolve_noise(self, source=None, instrument=None, *,
+                       reference_amp: float | None = None) -> NoiseModel:
         """Build the noise model. ``NoiseModel.read`` is an ABSOLUTE per-pixel std.
 
         ``self.read`` stays a dimensionless coefficient for backwards compatibility; it is
@@ -384,17 +431,17 @@ class SimConfig:
         of the instrument instead of a property of whatever tissue is in view.
 
         Note ``Instrument.read_floor`` is deliberately NOT adopted here: it is written as
-        ``read_std / 255`` (an 8-bit FPN scale, ``scripts/build_instrument.py``), which is
+        ``read_std / 255`` (an 8-bit FPN scale, an offline instrument calibration), which is
         not commensurate with the reference-DC units used above. Adopting it directly
         raises the floor ~11x and drives the whole retina into the noise. Grounding the
         floor in it needs that measurement re-expressed in spectrum units first.
 
         ``Instrument.snr_db`` IS adopted, as a multiplier on all three coefficients. SNR is
         an acquisition property, not a tissue one, and supplying each device's own is what
-        took held-out Maestro2 from 4/7 to 9/9 with no tissue refitting. It scales the whole
+        took held-out Device B from 4/7 to 9/9 with no tissue refitting. It scales the whole
         model rather than the read term because the floor is shot-dominated — see the note
         on the coefficients above. ``target_snr_db`` is NOT the channel for this: measured
-        on a Maestro2 render it moves the deep floor +3.0 dB where the device gap is 6.7 dB,
+        on a Device B render it moves the deep floor +3.0 dB where the device gap is 6.7 dB,
         because it back-solves ``read`` alone.
         """
         if self.noise_free or self.noise_level <= 0:
@@ -403,7 +450,9 @@ class SimConfig:
         if instrument is not None:
             lvl *= float(getattr(instrument, "noise_scale", 1.0))
 
-        ref_dc = float(self.reference_amp) ** 2
+        a_ref = float(reference_amp if reference_amp is not None
+                      else self.effective_reference_amp(instrument))
+        ref_dc = a_ref ** 2
         if source is not None:
             try:
                 ref_dc *= float(np.mean(source.power_spectrum(source.k_grid())))

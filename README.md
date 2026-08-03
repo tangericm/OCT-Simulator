@@ -1,21 +1,40 @@
-# octsim — a physically-modelled OCT simulation platform
+# OCT Simulator
 
-Generate synthetic OCT data — single B-scans or **volumes** of retina (macula,
-optic-nerve head, periphery), cornea, or bench targets (mirror, paper) — from a
-physical forward model, **per spectrum / per A-scan**. Every sample carries the raw
-interferometric spectra, the reconstructed B-scan, and a free per-pixel layer/feature
-label map. Built for training deep models in sparse-data regimes: one call yields **N
-independent random samples** defined by physics + acquisition parameters.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+
+A physics-based optical coherence tomography (OCT) simulator for training deep
+models when real labeled data is scarce. Every sample is generated from a
+forward optical model, per spectrum, per A-scan — not a texture filter over a
+label map — and comes with a free, pixel-perfect layer/feature ground truth.
 
 There is a **programmatic API** and a **PySide6 GUI**.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/assets/macula-bscan.jpg" alt="Simulated macular OCT B-scan" width="440"></td>
+    <td align="center"><img src="docs/assets/macula-labels.jpg" alt="Per-pixel layer label map for the same B-scan" width="440"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Simulated macular B-scan</strong></td>
+    <td align="center"><strong>Free per-pixel layer labels</strong></td>
+  </tr>
+</table>
+
+The label map above is a byproduct of rendering, not a separate annotation
+step — every generated sample ships one.
+
+<p align="center"><img src="docs/assets/gallery.jpg" alt="Gallery of mirror, paper, cornea, and macula presets" width="900"></p>
+
+## Quickstart
 
 ```python
 from octsim import SimConfig, simulate, generate_dataset
 
 cfg = SimConfig(
     anatomy="macula", scan_pattern="volume", n_frames=32, slow_fov_um=6000.0,
-    axial_resolution_um=5.0, lateral_fov_um=6000.0, lines_per_frame=512,
-    line_rate_hz=100_000, motion_level=1.0, falloff_6db_um=1500.0, noise_level=1.0,
+    lateral_fov_um=6000.0, lines_per_frame=512,
+    line_rate_hz=100_000, motion_level=1.0, noise_level=1.0,
 )
 sample = simulate(cfg, seed=1)                 # one B-scan or volume
 sample.volume_db          # [n_frames, depth, x] display stack (dB)
@@ -33,60 +52,55 @@ octsim --selftest            # headless smoke test, exit 0/1
 
 ## The physical model
 
-Per A-scan: a scene → a complex reflectivity field → the interferometric spectrum
-`I(k) = P(k)·|a_ref + Σ r·exp(i·2k·z)|²` → DC-removal + window + IFFT → B-scan. On top
-of the ideal fringe the forward model folds in the instrument/acquisition physics:
+Per A-scan: a scene → a complex reflectivity field → the interferometric
+spectrum `I(k) = P(k)·|a_ref + Σ r·exp(i·2k·z)|²` → DC-removal + window + IFFT
+→ B-scan. On top of the ideal fringe, the forward model folds in the
+instrument and acquisition physics that make a simulated scan behave like a
+real one rather than a clean rendering:
 
-- **Source & resolution** — Gaussian source sampled linearly in `k`; wavelength +
-  bandwidth set the axial resolution.
-- **Sensitivity fall-off** — depth-dependent roll-off (`sinc × Gaussian`), one 6 dB-depth knob.
-- **Dispersion** — a single intuitive knob: `0` = sharp, magnitude = axial stretch, sign = chirp direction.
-- **Acquisition speed** — line/sweep-rate → integration time `T_int`, which drives both the
-  collected signal (shot-limited SNR ∝ √T_int) **and** fringe washout — the real OCT trade-off, emergent.
-- **Motion & artifacts** — one continuous `Δz(t)` trajectory (drift + cardiac/breathing +
-  microsaccades) sampled along the acquisition time axis, so bulk motion, phase drift, and
-  washout are **correlated across A-scans and across the frames of a volume**.
-- **Detector noise** — shot (∝√I) + RIN (∝I) + read (floor), tunable clean → degraded, with a
-  noise-free toggle and a target-SNR (dB) knob.
-- **Wavelength-dependent tissue optics** — scattering falls with wavelength and water/melanin
-  absorption is modelled (`tissue.py`), so 1050/1310 nm penetrate the choroid better than 830-880 nm.
-- **Averaging** — `averages` is **1 by default (raw, full-speckle)**; set it higher for ART-like
-  incoherent averaging (clinical-display look). Training data should generally stay raw.
+- **Source & resolution** — Gaussian source sampled linearly in `k`;
+  wavelength and bandwidth set the axial resolution.
+- **Sensitivity fall-off & dispersion** — depth-dependent roll-off and a
+  single dispersion knob (magnitude = axial stretch, sign = chirp direction).
+- **Acquisition speed** — line/sweep rate sets the integration time, which
+  drives both the collected signal (shot-limited SNR) *and* fringe washout —
+  the real OCT speed/SNR trade-off, emergent rather than hand-tuned.
+- **Motion & artifacts** — one continuous depth trajectory (drift, cardiac,
+  microsaccades) sampled along acquisition time, so bulk motion and washout
+  are correlated across A-scans and across the frames of a volume.
+- **Detector noise** — shot, RIN, and read noise, tunable clean → degraded.
+- **Wavelength-dependent tissue optics** — scattering and absorption vary
+  with wavelength, so 1050/1310 nm penetrate the choroid better than
+  830–880 nm, matching known device behavior.
 
-First-Born / single-scattering: every scatterer contributes once (multiple scattering not modelled).
-
-## Resolvable parameters
-
-Physically-linked quantities may be specified from *either* side; the config back-solves the
-rest (a `0` on a linked field means "derive me") and reports both:
-
-| specify… | …or its physical target |
-| --- | --- |
-| `bandwidth_fwhm_nm` | `axial_resolution_um` |
-| `k_span_factor` | `axial_range_um` / `axial_sampling_um` (with `pixels_per_spectrum`) |
-| `beam_waist_um` | `lateral_resolution_um` |
-
-Scan geometry (fast axis `lateral_fov_um`/`lines_per_frame`, slow axis `slow_fov_um`/`n_frames`),
-speed (`line_rate_hz`, `duty_cycle`, `flyback_time_s`), and the adjustable sample position
-(`sample_depth_um`, `sample_lateral_offset_um`) round out the acquisition.
+Single-scattering only: every scatterer contributes once to a given A-scan.
 
 ## Anatomy
 
-Retina is modelled in 3D (enface-parameterized) with **reasonable physiological thicknesses**
-(total neurosensory retina ≈ 270 µm) and the characteristic OCT layer pattern, so a volume sweeps
-a consistent scene:
+Retina is modelled in 3D with physiological layer thicknesses and the
+characteristic OCT layer pattern, so a volume sweeps a consistent scene:
+a foveal pit with inner layers thinning toward the centre, an optic-nerve-head
+model with Bruch's-membrane termination and a central cup, and blood vessels
+with the correct hyporeflective-lumen/shadow signature. `generate_dataset`
+draws a fresh random anatomy, speckle, and motion realization per sample,
+reproducibly.
 
-- **Foveal pit** — inner layers (NFL…OPL) thin toward the centre while the photoreceptor/RPE
-  complex stays anchored flat; the ONL bulges centrally.
-- **Optic nerve head** — the RPE/photoreceptor bands **terminate at Bruch's-membrane opening**,
-  a central cup, RNFL thickening toward the disc, and a neural-canal fill (informed by clinical ONH OCT).
-- **Blood vessels** — vertically-oval hyporeflective lumen + hyperreflective wall in the inner
-  retina, with a posterior shadow.
-- **Choroid, vitreous, curvature.** Optical properties are illustrative and **calibratable** —
-  there is no validated per-layer retinal optical-property table; tune against real scans.
+## Realism validation
 
-`generate_dataset` draws a fresh random anatomy (layer thicknesses, pit/cup, vessels, position) +
-speckle + motion per sample, reproducible via `SeedSequence`.
+Simulated and real scans are scored with the same metric code — geometry,
+layer contrast, choroid texture, noise floor — against a training corpus and
+several **held-out devices the model was never fit to**, so improving the
+training score while quietly overfitting is visible immediately:
+
+```bash
+python scripts/validate_realism.py --folder "path/to/training_device_corpus" \
+    --holdout held_out_device --holdout octa500 --holdout octid
+```
+
+Held-out corpora are metric-*tiered*: 8-bit display-domain data has passed through an
+unknown tone curve, so only the statistics that survive it (geometry, spatial
+correlations) are scored there. Point `$OCT_DATA_ROOT` at a local scan tree; raw data is
+never committed.
 
 ## Package map
 
@@ -96,56 +110,47 @@ octsim/
   source.py        Gaussian source / k-grid / axial calibration
   optics.py        sensitivity fall-off + beam helpers
   dispersion.py    dispersion phase + compensation
-  acquisition.py   ScanGeometry + Timing (speed -> T_int, timestamps)
-  motion.py        continuous Δz(t) trajectory; bulk motion / drift / washout
-  sample.py        reflectivity core (single-draw speckle, per-column attenuation, features)
-  features.py      BloodVessel (+ shadow)
-  anatomy/retina.py  RetinaModel (layers, foveal pit, ONH, vessels), random/default builders
-  forward.py       I(k) with fall-off + dispersion + signal-scale + motion/washout
+  acquisition.py   scan geometry + timing (speed -> integration time)
+  motion.py        continuous depth trajectory; bulk motion / drift / washout
+  sample.py        reflectivity core (speckle, per-column attenuation, features)
+  anatomy/retina.py  layered retina model (foveal pit, ONH, vessels)
+  forward.py       interferometric spectrum with fall-off + dispersion + motion
   reconstruct.py   IFFT reconstruction (+ optional dispersion compensation)
-  noise.py         shot / RIN / read
+  noise.py         shot / RIN / read detector noise
   generate.py      simulate() (B-scan/volume) + generate_dataset() (N samples)
-  realism_metrics.py  landmark detection, RPE flattening, sim-vs-real metric vector + gates
-  attenuation.py   depth-resolved mu (Vermeer 2014) — read the module docstring first
-  data/display_domain.py  held-out 8-bit corpora (OCTA-500, OCTID) + axial-pitch calibration
-  presets.py       mirror / paper / cornea / macula (Sample)
-  gui/             PySide6 app (launcher, widgets) + CLI (app.py)
+  realism_metrics.py  sim-vs-real metric vector + validation gates
+  presets.py       mirror / paper / cornea / macula
+  gui/             PySide6 app + CLI
 ```
 
 ## Install & test
 
 ```bash
+git clone https://github.com/tangericm/OCT-Simulator.git
+cd OCT-Simulator
 pip install -e .            # core (numpy, scipy)
 pip install -e .[gui]       # + PySide6, pyqtgraph, matplotlib for the GUI
-python tests/test_phase_a.py  # ... phase_b, phase_c, phase_d, test_octsim
+
+python -m pytest
 QT_QPA_PLATFORM=offscreen python tests/test_gui_smoke.py
 ```
 
-The physics/anatomy/generation suites pin the resolvable config, timing, fall-off, dispersion,
-speed↔SNR trade, motion correlation, foveal pit, vessel shadow, ONH termination, and dataset
-reproducibility. `tests/test_wavelength.py` is the one check that cannot be passed by fitting a
-single device: it asserts the *known* wavelength behaviour of the tissue model (choroidal
-penetration and deep-tail decay at 840 / 1050 / 1310 nm). Every test is data-free — those needing
-real scans or PySide6 skip cleanly — so the whole suite runs in CI.
+The physics, anatomy, and generation suites are data-free, so the full test
+suite runs in CI without any real scans; anything that needs real data or
+PySide6 skips cleanly.
 
-## Realism validation
-
-```bash
-# training score against a real Maestro corpus, plus held-out devices with NO refitting
-python scripts/validate_realism.py --folder ".../Maestro3/6mm_1024Aline" \
-    --holdout maestro2 --holdout octa500 --holdout octid
-```
-
-Real and simulated frames go through the *same* metric code. The Maestro3 numbers are the
-training score; the held-out corpora are the generalization score, so a change that improves the
-first while worsening the second is visible as overfitting. Held-out corpora are metric-*tiered*:
-8-bit display-domain data has passed through an unknown tone curve, so only the statistics that
-survive it (geometry, spatial correlations) are gated there. Point `$OCT_DATA_ROOT` at the local
-scan tree; raw data is never committed.
+This is research software and is not intended for clinical diagnosis or
+treatment.
 
 ## Roadmap
 
-- Calibrate retinal layer optical properties against real macular OCT (biggest realism lever).
-- Cornea anatomy (endothelial mosaic, iris, lens) on the same feature framework.
-- Disk/raw-`uint16`/`.CLB` writers to feed the OCT-Denoiser / Reconstruction / Super-Resolution pipelines.
+- Calibrate retinal layer optical properties against real macular OCT
+  (biggest remaining realism lever).
+- Cornea anatomy (endothelial mosaic, iris, lens) on the same feature
+  framework.
+- Raw-data writers to feed the OCT-Denoiser and reconstruction pipelines.
 - Optional GPU/torch forward path for very large corpora.
+
+## License
+
+Released under the [MIT License](LICENSE).

@@ -1,6 +1,6 @@
 """Wavelength physics: the simulator must behave correctly at wavelengths it was not tuned at.
 
-Every photometric number in the layer table was obtained by matching a Topcon Maestro
+Every photometric number in the layer table was obtained by matching a commercial SD-OCT device
 B-scan at 840 nm. Those numbers can be right for the wrong reasons — a value that has
 absorbed the device's gain and tone curve will still reproduce that device. The check that
 cannot be passed by fitting is whether the model reproduces the *known* consequences of

@@ -15,8 +15,8 @@ regression.
 Why this matters here: it returns **mu in physical units (1/µm)**, a property of the
 tissue, whereas matching a layer's brightness to a particular B-scan yields a number that
 has silently absorbed that device's gain, tone curve and reference power. The simulator's
-layer table was built the second way and is therefore only valid at 840 nm on a Topcon
-Maestro; this module is the route to values that transfer.
+layer table was built the second way and is therefore only valid at 840 nm on one commercial
+SD-OCT device; this module is the route to values that transfer.
 
 **Known limitation, measured here — read before using the output as per-layer mu.**
 The derivation assumes the backscatter-to-attenuation ratio is CONSTANT with depth. The
@@ -25,7 +25,7 @@ On a synthetic A-line with uniform true mu = 4 /mm and a 30x bright band inserte
 estimator returns **24.8 /mm inside the band** and 3.3 /mm above it (4.0 /mm below, where
 the assumption is undisturbed). It converts backscatter contrast into apparent attenuation.
 
-Measured on the Maestro3 corpus that shows up as ~27 /mm at the RPE and 0.1-0.5 /mm through
+Measured on the Device A corpus that shows up as ~27 /mm at the RPE and 0.1-0.5 /mm through
 the inner retina, against published RNFL attenuation of ~4-5 /mm — the inner retina biased
 low by an order of magnitude because most of the light it passes is returned by the bright
 RPE beneath it, inflating the denominator.
@@ -39,7 +39,7 @@ Two hard requirements, both easy to violate:
 
 * **Linear intensity, not dB and not amplitude.** A log-domain or 8-bit display image
   gives a meaningless answer, which rules out every public 8-bit corpus and leaves the
-  Maestro ``.raw`` reconstruction as the only usable source here.
+  device ``.raw`` reconstruction as the only usable source here.
 * **The noise floor must be removed.** The estimator divides by the tail sum; if the tail
   is noise rather than signal, the denominator is dominated by the noise pedestal and mu
   is driven toward zero exactly where the signal is weakest (deep choroid).

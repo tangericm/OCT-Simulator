@@ -1,7 +1,7 @@
-"""Reconstruct real Topcon Maestro ``.raw`` frames into octsim's dB B-scan domain.
+"""Reconstruct real a commercial SD-OCT device ``.raw`` frames into octsim's dB B-scan domain.
 
-Shared by ``scripts/build_real_targets.py`` (real ``TextureProfile`` anchors) and
-``scripts/calibrate_optics.py`` (real-vs-simulated comparison figures), so both use the
+Shared by the offline target builder (real ``TextureProfile`` anchors) and
+the offline optics fit (real-vs-simulated comparison figures), so both use the
 *identical* pipeline the OCT-Denoiser uses:
 
     uint16 [2048, alines] order='F' → DC-fix + mean-A-line subtract → CLB cubic k-linear

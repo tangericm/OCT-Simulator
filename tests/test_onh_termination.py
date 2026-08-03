@@ -47,9 +47,13 @@ def test_terminated_layers_have_zero_thickness_inside_the_disc():
     cs, x = _onh_cross_section()
     i = cs.label_names.index("RPE")
     thick = cs.phys_b[i + 1] - cs.phys_b[i]
-    mid = slice(int(0.45 * ALINES), int(0.55 * ALINES))
-    assert thick[mid].max() < 1e-6, thick[mid].max()
-    assert thick[:int(0.15 * ALINES)].min() > 1.0     # present outside the disc
+    absent = np.where(thick < 1e-6)[0]
+    assert absent.size > 4, "expected a contiguous zero-thickness band inside the disc"
+    # A-lines well outside the absent band must still carry RPE.
+    left_out = slice(0, max(1, int(absent[0] * 0.5)))
+    right_out = slice(min(ALINES - 1, absent[-1] + (ALINES - absent[-1]) // 2), ALINES)
+    assert thick[absent].max() < 1e-6
+    assert thick[left_out].min() > 1.0 or thick[right_out].min() > 1.0
 
 
 def test_collapsed_layers_do_not_stack_their_interfaces():
@@ -87,23 +91,97 @@ def test_collapsed_layers_do_not_stack_their_interfaces():
     assert collapsed < 1.2 * separated, (collapsed, separated)
 
 
-def test_rpe_boundary_is_dragged_into_the_cup():
-    """KNOWN GAP, recorded deliberately: the positional half of the bug is NOT fixed.
+def test_rpe_boundary_stays_at_bmo_plane():
+    """R3 positional fix: RPE does not follow the cup excavation.
 
-    The cup excavates `opt_b[0]`, and every boundary is cumulative from it, so the RPE
-    boundary follows the cup down instead of staying at Bruch's level and ending. Real
-    anatomy is the opposite. This asserts the CURRENT broken behaviour so the gap is
-    visible in the suite; fixing R3's positional half will fail this test, which is the
-    point -- invert it then.
+    Absolute center-vs-edge RPE depth still differs by globe contour sag (~FOV bowl);
+    the bug was RPE tracking the *cup* (~500–900 µm extra). Assert RPE's center-edge
+    delta is far smaller than the ILM's (which carries the cup).
     """
     cs, x = _onh_cross_section()
+    i_rpe = cs.label_names.index("RPE")
+    # Cup may be off FOV centre; locate excavation from the ILM itself.
+    cup_i = int(np.argmax(cs.opt_b[0]))
+    half = max(8, ALINES // 20)
+    mid = slice(max(0, cup_i - half), min(ALINES, cup_i + half + 1))
+    edge = slice(0, int(0.15 * ALINES))
+    ilm_dive = float(cs.opt_b[0][mid].mean() - cs.opt_b[0][edge].mean())
+    rpe_dive = float(cs.opt_b[i_rpe][mid].mean() - cs.opt_b[i_rpe][edge].mean())
+    assert ilm_dive > 400.0, f"cup not excavating ILM ({ilm_dive:.0f} um)"
+    # Contour sag alone is ~0.4–0.5 of the ILM dive on a 6 mm ONH frame; require RPE to
+    # shed the cup component (pre-fix RPE dive ≈ ILM dive).
+    assert rpe_dive < 0.70 * ilm_dive, (
+        f"RPE still tracks the cup: RPE dive {rpe_dive:.0f} um vs ILM dive {ilm_dive:.0f} um")
+    canal_i = cs.label_names.index("canal")
+    assert float(cs.opt_b[i_rpe][mid].mean()) < float(cs.opt_b[canal_i + 1][mid].mean()) - 100.0, (
+        "RPE should sit above the canal floor, not at it")
+
+
+def test_onh_disc_is_off_center_like_device_a():
+    """Real Device A disc frames sit ~1.1 mm off FOV centre; sim must not pin the disc.
+
+    Pre-fix |disc−FOV/2| was ≤80 µm on every seed. Require a clear majority of
+    randomized ONH scenes to land ≥400 µm off centre (still keeping the BMO in-frame).
+    """
+    offs = []
+    for seed in range(40):
+        cfg = SimConfig(anatomy="onh", location="onh", lateral_fov_um=FOV,
+                        lines_per_frame=64, shape_model="normal", seed=seed, randomize=True)
+        scene = build_scene(cfg, np.random.default_rng(seed))
+        _, disc_x = scene._landmarks()
+        offs.append(abs(float(disc_x) - 0.5 * FOV))
+    offs = np.asarray(offs, float)
+    assert (offs >= 400.0).mean() >= 0.85, offs
+    assert offs.min() >= 400.0, offs.min()  # ONH draw is Uniform(500,1500) signed
+    assert offs.max() <= 0.5 * FOV - 200.0, offs.max()
+
+
+def test_cup_is_narrower_than_bmo_and_biased_temporally():
+    """Cup FWHM < BMO diameter; cup centre sits temporally of the disc axis."""
+    cfg = SimConfig(anatomy="onh", location="onh", lateral_fov_um=FOV,
+                    lines_per_frame=ALINES, shape_model="normal", seed=7, randomize=True)
+    scene = build_scene(cfg, np.random.default_rng(7))
+    x = np.linspace(0.0, FOV, ALINES)
+    fovea_x, disc_x = scene._landmarks()
+    cs = scene.cross_section(0.0, x, 840.0)
+    ilm = cs.opt_b[0]
+    # ILM half-max width of the excavation
+    edge = np.percentile(np.r_[ilm[:int(0.12 * ALINES)], ilm[int(0.88 * ALINES):]], 20)
+    floor = float(ilm.max())
+    half = edge + 0.5 * (floor - edge)
+    inside = np.where(ilm >= half)[0]
+    assert inside.size > 4
+    cup_fwhm = float(x[inside[-1]] - x[inside[0]])
+    bmo_diam = 2.0 * float(scene.onh_radius_um)
+    assert cup_fwhm < 0.90 * bmo_diam, (cup_fwhm, bmo_diam)
+    # Temporal = toward fovea
+    cup_x = float(x[int(np.argmax(ilm))])
+    toward_fovea = np.sign(fovea_x - disc_x) or -1.0
+    assert toward_fovea * (cup_x - disc_x) > 0.0, (cup_x, disc_x, fovea_x)
+    # BMO termination still centred on disc_x, not the cup
+    i_rpe = cs.label_names.index("RPE")
+    thick = cs.phys_b[i_rpe + 1] - cs.phys_b[i_rpe]
+    absent = np.where(thick < 1.0)[0]
+    assert absent.size > 4
+    bmo_c = 0.5 * (x[absent[0]] + x[absent[-1]])
+    assert abs(bmo_c - disc_x) < 0.25 * scene.onh_radius_um, (bmo_c, disc_x)
+
+
+def test_terminated_layers_follow_off_center_disc():
+    """Zero-thickness RPE band must track the (possibly off-centre) disc, not FOV mid."""
+    cfg = SimConfig(anatomy="onh", location="onh", lateral_fov_um=FOV,
+                    lines_per_frame=ALINES, shape_model="normal", seed=3, randomize=True)
+    scene = build_scene(cfg, np.random.default_rng(3))
+    x = np.linspace(0.0, FOV, ALINES)
+    _, disc_x = scene._landmarks()
+    cs = scene.cross_section(0.0, x, 840.0)
     i = cs.label_names.index("RPE")
-    top = cs.opt_b[i]
-    inside = top[int(0.45 * ALINES):int(0.55 * ALINES)].mean()
-    outside = top[:int(0.15 * ALINES)].mean()
-    assert inside - outside > 500.0, (
-        f"RPE boundary now only dives {inside - outside:.0f} um into the cup -- if the "
-        f"positional fix has landed, invert this test to assert it stays flat")
+    thick = cs.phys_b[i + 1] - cs.phys_b[i]
+    absent = np.where(thick < 1.0)[0]
+    assert absent.size > 4
+    bmo_c = 0.5 * (x[absent[0]] + x[absent[-1]])
+    assert abs(bmo_c - disc_x) < 200.0, (bmo_c, disc_x)
+    assert abs(disc_x - 0.5 * FOV) > 400.0, disc_x
 
 
 if __name__ == "__main__":

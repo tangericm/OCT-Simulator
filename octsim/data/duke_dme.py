@@ -13,7 +13,7 @@ The dataset is NOT redistributed here. Download ``2015_BOE_Chiu2.zip`` from the 
 (``people.duke.edu/~sf59/Chiu_BOE_2014_dataset.htm``), unzip, and point ``root`` at the
 ``2015_BOE_Chiu`` folder of ``Subject_*.mat`` files. **Caveat:** these are diabetic-macular-
 edema eyes, so raw thicknesses skew thick; ``max_total_um`` filters toward the more-normal
-scans, and the learned shape model is the artifact that travels — refit on normal / Maestro
+scans, and the learned shape model is the artifact that travels — refit on normal / device
 data with the same API when available.
 """
 
